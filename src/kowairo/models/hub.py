@@ -76,6 +76,7 @@ class HubSearchResult:
     size_mb: float
     styles: list[str]
     sample_url: str
+    icon_url: str
 
 
 def search_models(keyword: str = "", sort: str = "download",
@@ -114,7 +115,9 @@ def search_models(keyword: str = "", sort: str = "download",
             license_type=aivmx.get("license_type", ""),
             size_mb=round(int(aivmx.get("file_size", 0)) / 1e6, 1),
             styles=styles,
-            sample_url=sample))
+            sample_url=sample,
+            icon_url=(speakers[0].get("icon_url", "")
+                      if speakers else "")))
     return int(d.get("total", 0)), out
 
 

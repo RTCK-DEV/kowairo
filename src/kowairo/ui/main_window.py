@@ -6,8 +6,8 @@ import datetime
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtCore import QObject, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QIcon, QLinearGradient, QPainter, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -44,6 +44,7 @@ from .workers import (
     EngineSetupWorker,
     HubSearchWorker,
     ModelInstallWorker,
+    ThumbFetchWorker,
 )
 
 
@@ -69,12 +70,19 @@ class LevelMeter(QWidget):
 
     def paintEvent(self, e) -> None:
         p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
-        p.fillRect(0, 0, w, h, QColor("#202020"))
-        frac = (self._db + 60.0) / 60.0
-        fw = int(w * max(0.0, frac))
-        grad = QColor("#3ad06e") if self._db < -6 else QColor("#e0a030")
-        p.fillRect(0, 0, fw, h, grad)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor("#12141a"))
+        p.drawRoundedRect(0, 0, w, h, h // 2, h // 2)
+        fw = int(w * max(0.0, (self._db + 60.0) / 60.0))
+        if fw > 0:
+            grad = QLinearGradient(0, 0, w, 0)
+            grad.setColorAt(0.0, QColor("#3ad06e"))
+            grad.setColorAt(0.75, QColor("#e0b83a"))
+            grad.setColorAt(1.0, QColor("#e0564f"))
+            p.setBrush(grad)
+            p.drawRoundedRect(0, 0, fw, h, h // 2, h // 2)
         p.end()
 
 
@@ -82,7 +90,8 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Kowairo — AI Voice Changer")
-        self.resize(980, 720)
+        self.resize(1100, 780)
+        self.setMinimumSize(960, 640)
 
         self.settings = self._load_settings()
         self._bridge = _Bridge()
@@ -104,6 +113,8 @@ class MainWindow(QMainWindow):
         self._lib_page = 0
         self._media: QMediaPlayer | None = None
         self._audio_out: QAudioOutput | None = None
+        self._thumb_placeholder = QPixmap(72, 72)
+        self._thumb_placeholder.fill(QColor("#22242e"))
 
         self._build_ui()
         self._refresh_devices()
@@ -168,9 +179,9 @@ class MainWindow(QMainWindow):
         trans = QGroupBox("変換")
         tf = QVBoxLayout(trans)
         self.btn_start = QPushButton("▶ 変換開始")
+        self.btn_start.setObjectName("accent")
         self.btn_start.setEnabled(False)
-        self.btn_start.setMinimumHeight(44)
-        self.btn_start.setStyleSheet("font-size:16px; font-weight:bold;")
+        self.btn_start.setMinimumHeight(48)
         self.btn_start.clicked.connect(self._toggle)
         tf.addWidget(self.btn_start)
         mrow = QHBoxLayout()
@@ -257,6 +268,15 @@ class MainWindow(QMainWindow):
         tv.addLayout(srow)
         ls = QSplitter(Qt.Orientation.Horizontal)
         self.list_lib = QListWidget()
+        self.list_lib.setObjectName("cards")
+        self.list_lib.setViewMode(QListWidget.ViewMode.IconMode)
+        self.list_lib.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.list_lib.setIconSize(QSize(72, 72))
+        self.list_lib.setGridSize(QSize(140, 120))
+        self.list_lib.setSpacing(6)
+        self.list_lib.setWordWrap(True)
+        self.list_lib.setUniformItemSizes(True)
+        self.list_lib.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.list_lib.currentRowChanged.connect(self._lib_select)
         ls.addWidget(self.list_lib)
         self.txt_lib_detail = QTextEdit(readOnly=True)
@@ -466,13 +486,34 @@ class MainWindow(QMainWindow):
         if page == 1:
             self._lib_entries = []
             self.list_lib.clear()
+        base = len(self._lib_entries)
         self._lib_entries.extend(entries)
         for e in entries:
-            QListWidgetItem(
-                f"{e.name} — {e.author} (DL {e.downloads:,})",
-                self.list_lib)
+            it = QListWidgetItem(
+                QIcon(self._thumb_placeholder),
+                f"{e.name}\nDL {e.downloads:,}")
+            it.setToolTip(f"{e.name} — {e.author}")
+            self.list_lib.addItem(it)
+        fetch = [(base + i, e.icon_url)
+                 for i, e in enumerate(entries) if e.icon_url]
+        if fetch:
+            w = ThumbFetchWorker(fetch)
+            w.thumb.connect(self._lib_thumb)
+            self._keep(w)
+            w.start()
         self.btn_lib_more.setEnabled(len(self._lib_entries) < total)
         self._log(f"ライブラリ: {len(self._lib_entries)}/{total} 件")
+
+    def _lib_thumb(self, row: int, data: bytes) -> None:
+        pm = QPixmap()
+        if not pm.loadFromData(data):
+            return
+        item = self.list_lib.item(row)
+        if item:
+            item.setIcon(QIcon(pm.scaled(
+                72, 72,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation)))
 
     def _lib_entry(self):
         row = self.list_lib.currentRow()
@@ -567,6 +608,9 @@ class MainWindow(QMainWindow):
             self._fatal("開始に失敗", str(e))
             return
         self.btn_start.setText("■ 停止")
+        self.btn_start.setObjectName("stop")
+        self.btn_start.style().unpolish(self.btn_start)
+        self.btn_start.style().polish(self.btn_start)
         self._log("変換を開始しました")
 
     def _stop(self) -> None:
@@ -585,6 +629,9 @@ class MainWindow(QMainWindow):
             self._log(f"録音を保存: {p}")
             self._record_chunks.clear()
         self.btn_start.setText("▶ 変換開始")
+        self.btn_start.setObjectName("accent")
+        self.btn_start.style().unpolish(self.btn_start)
+        self.btn_start.style().polish(self.btn_start)
         self._log("変換を停止しました")
 
     def _on_output_chunk(self, pcm: np.ndarray, rate: int) -> None:

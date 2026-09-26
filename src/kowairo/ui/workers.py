@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
 from PySide6.QtCore import QThread, Signal
 
 from ..asr.sherpa import SherpaReazonASR, ensure_silero_vad
@@ -84,6 +85,28 @@ class HubSearchWorker(QThread):
             total, entries = hub.search_models(
                 keyword=self.keyword, sort=self.sort, page=self.page)
             self.done.emit(total, entries)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class ThumbFetchWorker(QThread):
+    """Fetches model thumbnails off the UI thread (bytes → GUI builds QPixmap)."""
+
+    thumb = Signal(int, bytes)   # list row, image data
+    failed = Signal(str)
+
+    def __init__(self, items: list[tuple[int, str]]) -> None:
+        super().__init__()
+        self._items = items
+
+    def run(self) -> None:
+        try:
+            for row, url in self._items:
+                if not url:
+                    continue
+                r = httpx.get(url, timeout=httpx.Timeout(15.0, connect=8.0))
+                r.raise_for_status()
+                self.thumb.emit(row, r.content)
         except Exception as e:
             self.failed.emit(str(e))
 
