@@ -137,7 +137,6 @@ class VoiceChangerPipeline:
         self._cur_mon = np.zeros(0, np.float32)
         self._cur_mon_pos = 0
         self._out_rate = TTS_RATE
-        self._recording: list[np.ndarray] = []
 
     def _new_vad(self) -> VadSegmenter:
         s = self.settings
@@ -155,8 +154,14 @@ class VoiceChangerPipeline:
         self._spawn(self._asr_worker, "asr")
         self._spawn(self._tts_worker, "tts")
         self._spawn(self._play_worker, "play")
-        self._open_output()
-        self._open_capture()
+        try:
+            self._open_output()
+            self._open_capture()
+        except Exception:
+            # workers/streams are already up — tear them down before
+            # propagating so a failed start leaks nothing
+            self.stop()
+            raise
 
     def _spawn(self, fn, name: str) -> None:
         t = threading.Thread(target=self._guarded, args=(fn, name),
@@ -183,14 +188,10 @@ class VoiceChangerPipeline:
         self._in_stream = self._out_stream = self._monitor_stream = None
         for q in (self._utter_q, self._clause_q, self._play_q):
             with contextlib.suppress(queue.Full):
-                q.put_nowait(None)
+                q.put(None, timeout=0.5)
         for t in self._threads:
             t.join(timeout=3)
         self._threads.clear()
-        if self._recording:
-            out = np.concatenate(self._recording)
-            self.on_output(out, self._out_rate)
-            self._recording.clear()
         self.vad = self._new_vad()
 
     # ------------------------------------------------------------ capture
@@ -229,6 +230,7 @@ class VoiceChangerPipeline:
         self.on_level(rms_db(pcm), -1.0)
         if self.settings.passthrough:
             self._enqueue_play(pcm, None, src_rate=ASR_RATE)
+            return
         for seg in self.vad.feed(pcm):
             try:
                 self._utter_q.put_nowait(Utterance(seg, time.monotonic()))
@@ -330,8 +332,6 @@ class VoiceChangerPipeline:
             if item is None:
                 return
             pcm, job = item
-            if self.settings.record_output:
-                self._recording.append(pcm)
             self.on_output(pcm, self._out_rate)
             self._enqueue_play(pcm, job)
 

@@ -259,7 +259,8 @@ class MainWindow(QMainWindow):
         for label, key in (("人気順", "download"), ("いいね順", "like"),
                            ("新着順", "recent")):
             self.cmb_lib_sort.addItem(label, key)
-        self.cmb_lib_sort.currentIndexChanged.connect(self._lib_search)
+        self.cmb_lib_sort.currentIndexChanged.connect(
+            lambda *_: self._lib_search())
         btn_lib_search = QPushButton("検索")
         btn_lib_search.clicked.connect(self._lib_search)
         srow.addWidget(self.txt_lib_search, 1)
@@ -657,12 +658,24 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._log(f"合成エラー: {e}")
             return
-        # route through the playback queue when running, else play ad-hoc
         if self.pipeline is not None:
             from ..util.audio import wav_to_pcm
 
             pcm, r = wav_to_pcm(wav)
             self.pipeline._enqueue_play(pcm, None, src_rate=r)
+            self._log(f"読み上げ: {text}")
+        else:
+            # no pipeline running — play through Qt Multimedia
+            from .. import paths
+
+            tmp = paths.data_dir() / "preview.wav"
+            tmp.write_bytes(wav)
+            if self._media is None:
+                self._audio_out = QAudioOutput()
+                self._media = QMediaPlayer()
+                self._media.setAudioOutput(self._audio_out)
+            self._media.setSource(QUrl.fromLocalFile(str(tmp)))
+            self._media.play()
             self._log(f"読み上げ: {text}")
 
     # ------------------------------------------------------------------ events
@@ -692,9 +705,13 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e) -> None:
         self._stop()
+        if self._media is not None:
+            self._media.stop()
         self.engine.stop()
         if self.client:
             self.client.close()
+        for w in list(self._workers):
+            w.wait(1500)
         e.accept()
 
 

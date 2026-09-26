@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 from .asr.sherpa import SherpaReazonASR, ensure_silero_vad
 from .audio.pipeline import VoiceChangerPipeline
@@ -61,7 +62,7 @@ def run_cli(args) -> int:
             t0 = time.monotonic()
             wav = client.synthesize(args.text, style_id, output_rate=48000)
             dt = (time.monotonic() - t0) * 1000
-            out = args.output or "out.wav"
+            out = args.output or Path("out.wav")
             out.write_bytes(wav)
             print(f"[cli] synthesized {len(wav)} bytes in {dt:.0f}ms -> {out}",
                   flush=True)
@@ -82,7 +83,7 @@ def run_cli(args) -> int:
             pipe = VoiceChangerPipeline(
                 s, client, asr, ensure_silero_vad(), on_log=log)
             pcm, texts, _stats = pipe.run_file(args.input, progress=log)
-            out = args.output or "out.wav"
+            out = args.output or Path("out.wav")
             out.write_bytes(pcm_to_wav(pcm, 48000))
             print(f"[cli] done: {len(texts)} utterances, "
                   f"{pcm.size/48000:.1f}s audio -> {out}", flush=True)

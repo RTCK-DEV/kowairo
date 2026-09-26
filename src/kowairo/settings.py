@@ -87,4 +87,7 @@ def save(s: Settings) -> None:
         _cache = s
         p = paths.settings_path()
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(asdict(s), ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(asdict(s), ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+        tmp.replace(p)

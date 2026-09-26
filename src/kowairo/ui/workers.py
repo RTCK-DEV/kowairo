@@ -100,15 +100,15 @@ class ThumbFetchWorker(QThread):
         self._items = items
 
     def run(self) -> None:
-        try:
-            for row, url in self._items:
-                if not url:
-                    continue
+        for row, url in self._items:
+            if not url:
+                continue
+            try:
                 r = httpx.get(url, timeout=httpx.Timeout(15.0, connect=8.0))
                 r.raise_for_status()
                 self.thumb.emit(row, r.content)
-        except Exception as e:
-            self.failed.emit(str(e))
+            except Exception as e:
+                self.failed.emit(f"thumb {row}: {e}")
 
 
 class AsrSetupWorker(QThread):
