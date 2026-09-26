@@ -6,8 +6,9 @@ import datetime
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QPainter
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QProgressBar,
@@ -37,7 +39,12 @@ from ..engine.client import EngineClient
 from ..engine.manager import EngineManager
 from ..settings import Settings, save
 from ..util.audio import pcm_to_wav
-from .workers import AsrSetupWorker, EngineSetupWorker, ModelInstallWorker
+from .workers import (
+    AsrSetupWorker,
+    EngineSetupWorker,
+    HubSearchWorker,
+    ModelInstallWorker,
+)
 
 
 class _Bridge(QObject):
@@ -93,6 +100,10 @@ class MainWindow(QMainWindow):
         self._bridge.stats.connect(self._on_stats)
         self._workers: list = []
         self._record_chunks: list[np.ndarray] = []
+        self._lib_entries: list = []
+        self._lib_page = 0
+        self._media: QMediaPlayer | None = None
+        self._audio_out: QAudioOutput | None = None
 
         self._build_ui()
         self._refresh_devices()
@@ -226,6 +237,50 @@ class MainWindow(QMainWindow):
         tm.addWidget(self.chk_record)
         tabs_root.addTab(tab_model, "モデル管理")
 
+        # AivisHub library tab
+        tab_lib = QWidget()
+        tv = QVBoxLayout(tab_lib)
+        srow = QHBoxLayout()
+        self.txt_lib_search = QLineEdit()
+        self.txt_lib_search.setPlaceholderText("AivisHub のモデルを検索…")
+        self.txt_lib_search.returnPressed.connect(self._lib_search)
+        self.cmb_lib_sort = QComboBox()
+        for label, key in (("人気順", "download"), ("いいね順", "like"),
+                           ("新着順", "recent")):
+            self.cmb_lib_sort.addItem(label, key)
+        self.cmb_lib_sort.currentIndexChanged.connect(self._lib_search)
+        btn_lib_search = QPushButton("検索")
+        btn_lib_search.clicked.connect(self._lib_search)
+        srow.addWidget(self.txt_lib_search, 1)
+        srow.addWidget(self.cmb_lib_sort)
+        srow.addWidget(btn_lib_search)
+        tv.addLayout(srow)
+        ls = QSplitter(Qt.Orientation.Horizontal)
+        self.list_lib = QListWidget()
+        self.list_lib.currentRowChanged.connect(self._lib_select)
+        ls.addWidget(self.list_lib)
+        self.txt_lib_detail = QTextEdit(readOnly=True)
+        ls.addWidget(self.txt_lib_detail)
+        ls.setStretchFactor(0, 1)
+        ls.setStretchFactor(1, 1)
+        tv.addWidget(ls, 1)
+        arow = QHBoxLayout()
+        self.btn_lib_play = QPushButton("▶ 試聴")
+        self.btn_lib_play.setEnabled(False)
+        self.btn_lib_play.clicked.connect(self._lib_play)
+        self.btn_lib_install = QPushButton("このモデルを導入")
+        self.btn_lib_install.setEnabled(False)
+        self.btn_lib_install.clicked.connect(self._lib_install)
+        arow.addWidget(self.btn_lib_play)
+        arow.addWidget(self.btn_lib_install)
+        arow.addStretch(1)
+        self.btn_lib_more = QPushButton("さらに読み込む")
+        self.btn_lib_more.setEnabled(False)
+        self.btn_lib_more.clicked.connect(lambda: self._lib_search(more=True))
+        arow.addWidget(self.btn_lib_more)
+        tv.addLayout(arow)
+        tabs_root.addTab(tab_lib, "オンラインライブラリ")
+
         # setup progress
         self.progress = QProgressBar()
         self.progress.setVisible(False)
@@ -277,6 +332,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ boot
     def _bootstrap(self) -> None:
         self._log("Kowairo 起動")
+        self._lib_search()
         self._start_engine_setup()
 
     def _start_engine_setup(self) -> None:
@@ -391,6 +447,71 @@ class MainWindow(QMainWindow):
         self._hide_progress()
         self._log(f"モデル導入完了: {name}")
         self._refresh_models()
+
+    # ------------------------------------------------------------------ library
+    def _lib_search(self, more: bool = False) -> None:
+        page = self._lib_page + 1 if more else 1
+        w = HubSearchWorker(
+            keyword=self.txt_lib_search.text().strip(),
+            sort=self.cmb_lib_sort.currentData() or "download",
+            page=page)
+        w.done.connect(lambda total, entries, p=page:
+                       self._lib_results(total, entries, p))
+        w.failed.connect(lambda m: self._log(f"ライブラリ検索に失敗: {m}"))
+        self._keep(w)
+        w.start()
+
+    def _lib_results(self, total: int, entries: list, page: int) -> None:
+        self._lib_page = page
+        if page == 1:
+            self._lib_entries = []
+            self.list_lib.clear()
+        self._lib_entries.extend(entries)
+        for e in entries:
+            QListWidgetItem(
+                f"{e.name} — {e.author} (DL {e.downloads:,})",
+                self.list_lib)
+        self.btn_lib_more.setEnabled(len(self._lib_entries) < total)
+        self._log(f"ライブラリ: {len(self._lib_entries)}/{total} 件")
+
+    def _lib_entry(self):
+        row = self.list_lib.currentRow()
+        if 0 <= row < len(self._lib_entries):
+            return self._lib_entries[row]
+        return None
+
+    def _lib_select(self, row: int) -> None:
+        e = self._lib_entry()
+        self.btn_lib_play.setEnabled(bool(e and e.sample_url))
+        self.btn_lib_install.setEnabled(bool(e))
+        if not e:
+            return
+        self.txt_lib_detail.setPlainText(
+            f"{e.name}\n"
+            f"作者: {e.author}\n"
+            f"ライセンス: {e.license_type}   声質: {e.timbre}   "
+            f"カテゴリ: {e.category}\n"
+            f"サイズ: {e.size_mb} MB   DL数: {e.downloads:,}   いいね: {e.likes}\n"
+            f"スタイル: {', '.join(e.styles) or '—'}\n"
+            f"UUID: {e.uuid}\n\n{e.description}")
+
+    def _lib_play(self) -> None:
+        e = self._lib_entry()
+        if not (e and e.sample_url):
+            return
+        if self._media is None:
+            self._audio_out = QAudioOutput()
+            self._media = QMediaPlayer()
+            self._media.setAudioOutput(self._audio_out)
+        self._media.setSource(QUrl(e.sample_url))
+        self._media.play()
+        self._log(f"試聴: {e.name}")
+
+    def _lib_install(self) -> None:
+        e = self._lib_entry()
+        if e:
+            self._log(f"{e.name} を AivisHub から導入します…")
+            self._install_model(hub_uuid=e.uuid)
 
     # ------------------------------------------------------------------ run
     def _toggle(self) -> None:

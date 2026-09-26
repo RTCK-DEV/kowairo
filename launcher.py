@@ -8,8 +8,8 @@ from kowairo.app import main
 # silent — keep a persistent crash log under the data dir for diagnostics.
 if getattr(sys, "frozen", False):
     import atexit
+    import contextlib
     import faulthandler
-    from pathlib import Path
 
     from kowairo import paths
 
@@ -21,10 +21,8 @@ if getattr(sys, "frozen", False):
 
     @atexit.register
     def _flush() -> None:
-        try:
+        with contextlib.suppress(Exception):
             _fh.flush()
-        except Exception:
-            pass
 
 if __name__ == "__main__":
     sys.exit(main())

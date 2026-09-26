@@ -68,6 +68,26 @@ class ModelInstallWorker(QThread):
             self.failed.emit(str(e))
 
 
+class HubSearchWorker(QThread):
+    done = Signal(int, list)     # total count, [HubSearchResult]
+    failed = Signal(str)
+
+    def __init__(self, keyword: str = "", sort: str = "download",
+                 page: int = 1) -> None:
+        super().__init__()
+        self.keyword = keyword
+        self.sort = sort
+        self.page = page
+
+    def run(self) -> None:
+        try:
+            total, entries = hub.search_models(
+                keyword=self.keyword, sort=self.sort, page=self.page)
+            self.done.emit(total, entries)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
 class AsrSetupWorker(QThread):
     progress = Signal(str, int, int)
     done = Signal(object)    # SherpaReazonASR
