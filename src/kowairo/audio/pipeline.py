@@ -28,6 +28,7 @@ from ..asr.base import ASRBackend
 from ..engine.client import EngineClient
 from ..settings import Settings
 from ..util.audio import resample, rms_db, wav_to_pcm
+from .fx import FxChain, apply_gain_limiter
 from .pitch import median_f0, semitone_shift
 from .vad import VadSegmenter
 
@@ -137,6 +138,8 @@ class VoiceChangerPipeline:
         self._cur_mon = np.zeros(0, np.float32)
         self._cur_mon_pos = 0
         self._out_rate = TTS_RATE
+        self._fx: FxChain | None = None
+        self.muted = False
 
     def _new_vad(self) -> VadSegmenter:
         s = self.settings
@@ -227,15 +230,32 @@ class VoiceChangerPipeline:
         self._dispatch_mic(indata[:, 0].copy())
 
     def _dispatch_mic(self, pcm: np.ndarray) -> None:
-        self.on_level(rms_db(pcm), -1.0)
-        if self.settings.passthrough:
+        s = self.settings
+        if s.input_gain != 1.0:
+            pcm = np.clip(pcm * np.float32(s.input_gain), -1.0, 1.0)
+        db = rms_db(pcm)
+        self.on_level(db, -1.0)
+        if self.muted or db < s.noise_gate_db:
+            # keep VAD timing alive (feed silence) so in-flight utterances
+            # endpoint normally; passthrough emits silence instead of noise
+            silent = np.zeros_like(pcm)
+            if s.passthrough:
+                self._enqueue_play(silent, None, src_rate=ASR_RATE)
+            else:
+                for _seg in self.vad.feed(silent):
+                    self._offer_utterance(_seg)
+            return
+        if s.passthrough:
             self._enqueue_play(pcm, None, src_rate=ASR_RATE)
             return
         for seg in self.vad.feed(pcm):
-            try:
-                self._utter_q.put_nowait(Utterance(seg, time.monotonic()))
-            except queue.Full:
-                self.on_log("発話キュー溢れ: セグメントを破棄")
+            self._offer_utterance(seg)
+
+    def _offer_utterance(self, seg: np.ndarray) -> None:
+        try:
+            self._utter_q.put_nowait(Utterance(seg, time.monotonic()))
+        except queue.Full:
+            self.on_log("発話キュー溢れ: セグメントを破棄")
 
     def feed_pcm(self, pcm16k: np.ndarray) -> None:
         """External PCM source (file/stream) — same path as the mic callback."""
@@ -361,10 +381,23 @@ class VoiceChangerPipeline:
             self._monitor_stream.start()
         self.on_log(f"出力: {rate} Hz で再生中")
 
+    def play_external(self, pcm: np.ndarray, src_rate: int) -> None:
+        """Mix external audio (soundboard / manual playback) into output."""
+        self._enqueue_play(pcm, None, src_rate=src_rate)
+
+    def _postprocess(self, pcm: np.ndarray) -> np.ndarray:
+        s = self.settings
+        if self._fx is None:
+            self._fx = FxChain(s.fx_mode, s.fx_amount, self._out_rate)
+        self._fx.set(s.fx_mode, s.fx_amount)
+        pcm = self._fx.apply(pcm)
+        return apply_gain_limiter(pcm, s.output_gain, s.limiter)
+
     def _enqueue_play(self, pcm: np.ndarray, job: ClauseJob | None,
                       src_rate: int = TTS_RATE) -> None:
         if src_rate != self._out_rate:
             pcm = resample(pcm, src_rate, self._out_rate)
+        pcm = self._postprocess(pcm)
         cap = int(self._out_rate * self.settings.drop_when_behind_ms / 1000)
         with self._buf_lock:
             self._playbuf.append(pcm)
@@ -466,7 +499,7 @@ class VoiceChangerPipeline:
                 tts_ms = (time.monotonic() - t0) * 1000
                 cp, r = wav_to_pcm(wav)
                 cp = resample(cp, r, TTS_RATE)
-                out_chunks.append(cp)
+                out_chunks.append(self._postprocess(cp))
                 log(f"TTS ({tts_ms:.0f}ms): {job.text}")
         if out_chunks:
             return np.concatenate(out_chunks), texts, self.stats

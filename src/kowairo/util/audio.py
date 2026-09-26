@@ -51,6 +51,14 @@ def resample(pcm: np.ndarray, src_rate: int, dst_rate: int, quality: str = "HQ")
     return res.astype(np.float32)
 
 
+def load_audio_file(path) -> tuple[np.ndarray, int]:
+    """Decode any common audio file (wav/flac/ogg/mp3…) to mono float32."""
+    import soundfile as sf
+
+    data, rate = sf.read(str(path), dtype="float32", always_2d=True)
+    return data.mean(axis=1).astype(np.float32), int(rate)
+
+
 def rms_db(pcm: np.ndarray, floor: float = -80.0) -> float:
     if pcm.size == 0:
         return floor

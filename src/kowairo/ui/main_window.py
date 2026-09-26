@@ -7,20 +7,32 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import QObject, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QIcon, QLinearGradient, QPainter, QPixmap
+from PySide6.QtGui import (
+    QColor,
+    QDesktopServices,
+    QIcon,
+    QKeySequence,
+    QLinearGradient,
+    QPainter,
+    QPixmap,
+    QShortcut,
+)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -38,7 +50,7 @@ from ..audio.pipeline import PipelineStats, VoiceChangerPipeline
 from ..engine.client import EngineClient
 from ..engine.manager import EngineManager
 from ..settings import Settings, save
-from ..util.audio import pcm_to_wav
+from ..util.audio import load_audio_file, pcm_to_wav
 from .workers import (
     AsrSetupWorker,
     EngineSetupWorker,
@@ -115,6 +127,10 @@ class MainWindow(QMainWindow):
         self._audio_out: QAudioOutput | None = None
         self._thumb_placeholder = QPixmap(72, 72)
         self._thumb_placeholder.fill(QColor("#22242e"))
+        self._pad_paths: list[str] = list(
+            self.settings.extra.get("pads", [""] * 8))[:8]
+        self._pad_paths += [""] * (8 - len(self._pad_paths))
+        self._pad_buttons: list[QPushButton] = []
 
         self._build_ui()
         self._refresh_devices()
@@ -146,11 +162,29 @@ class MainWindow(QMainWindow):
         self.chk_monitor = QCheckBox("モニター")
         row2.addWidget(self.chk_monitor)
         form.addRow("モニター出力", row2)
+        btn_vcable = QPushButton("仮想デバイス (VB-CABLE) ガイド")
+        btn_vcable.clicked.connect(self._open_vcable_guide)
+        form.addRow(btn_vcable)
         ll.addWidget(dev)
 
         # --- voice
         voice = QGroupBox("ボイス設定")
         vf = QFormLayout(voice)
+        prow = QHBoxLayout()
+        self.cmb_preset = QComboBox()
+        self.cmb_preset.setMinimumWidth(140)
+        prow.addWidget(self.cmb_preset, 1)
+        btn_psave = QPushButton("保存")
+        btn_psave.clicked.connect(self._preset_save)
+        btn_pdel = QPushButton("削除")
+        btn_pdel.clicked.connect(self._preset_delete)
+        prow.addWidget(btn_psave)
+        prow.addWidget(btn_pdel)
+        pw = QWidget()
+        pw.setLayout(prow)
+        vf.addRow("プリセット", pw)
+        self.cmb_preset.currentIndexChanged.connect(
+            lambda *_: self._preset_apply())
         self.cmb_style = QComboBox()
         vf.addRow("モデル / スタイル", self.cmb_style)
         self.sld_speed = self._slider(50, 200, 100)
@@ -174,6 +208,30 @@ class MainWindow(QMainWindow):
         vf.addRow(self.chk_passthrough)
         vf.addRow(self.chk_gpu)
         ll.addWidget(voice)
+
+        # --- mixer / FX (competitor parity: gain, noise gate, effects)
+        mix = QGroupBox("ミキサー / エフェクト")
+        mf = QFormLayout(mix)
+        self.sld_in_gain = self._slider(0, 200, 100)
+        self.sld_out_gain = self._slider(0, 200, 100)
+        self.sld_gate = self._slider(-80, -20, -60)
+        self.sld_gate.setToolTip("この dB 未満の入力を無音化 (オフは -80)")
+        mf.addRow("入力ゲイン %", self.sld_in_gain)
+        mf.addRow("ノイズゲート dB", self.sld_gate)
+        mf.addRow("出力ゲイン %", self.sld_out_gain)
+        self.chk_limiter = QCheckBox("リミッター (クリップ防止)")
+        self.chk_limiter.setChecked(True)
+        mf.addRow(self.chk_limiter)
+        self.cmb_fx = QComboBox()
+        for label, key in (("なし", "off"), ("エコー", "echo"),
+                           ("リバーブ", "reverb"), ("ロボット", "robot")):
+            self.cmb_fx.addItem(label, key)
+        mf.addRow("エフェクト", self.cmb_fx)
+        self.sld_fx = self._slider(0, 100, 50)
+        mf.addRow("エフェクト量", self.sld_fx)
+        self.chk_mute = QCheckBox("ミュート (入力を遮断)")
+        mf.addRow(self.chk_mute)
+        ll.addWidget(mix)
 
         # --- transport
         trans = QGroupBox("変換")
@@ -302,6 +360,27 @@ class MainWindow(QMainWindow):
         tv.addLayout(arow)
         tabs_root.addTab(tab_lib, "オンラインライブラリ")
 
+        # soundboard tab
+        tab_sb = QWidget()
+        sv = QVBoxLayout(tab_sb)
+        sv.addWidget(QLabel(
+            "パッドをクリックで再生 / 未設定ならファイル割り当て。"
+            "右クリックで解除。F1〜F8 でも再生できます。"))
+        grid = QGridLayout()
+        for i in range(8):
+            b = QPushButton(f"F{i+1}: —")
+            b.setMinimumHeight(56)
+            b.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            b.clicked.connect(lambda _=False, k=i: self._pad_click(k))
+            b.customContextMenuRequested.connect(
+                lambda pos, k=i, btn=b: self._pad_menu(k, btn, pos))
+            self._pad_buttons.append(b)
+            grid.addWidget(b, i // 4, i % 4)
+        sv.addLayout(grid)
+        sv.addStretch(1)
+        tabs_root.addTab(tab_sb, "サウンドボード")
+        self._pad_refresh_labels()
+
         # setup progress
         self.progress = QProgressBar()
         self.progress.setVisible(False)
@@ -318,6 +397,45 @@ class MainWindow(QMainWindow):
         root.addWidget(right)
         root.setStretchFactor(0, 0)
         root.setStretchFactor(1, 1)
+
+        # --- shortcuts (w-okada VCClient parity)
+        QShortcut(QKeySequence("Ctrl+Shift+C"), self, self._toggle)
+        QShortcut(QKeySequence("Ctrl+Shift+P"), self,
+                  lambda: self.chk_passthrough.toggle())
+        QShortcut(QKeySequence("Ctrl+Shift+M"), self,
+                  lambda: self.chk_mute.toggle())
+        for i in range(8):
+            QShortcut(QKeySequence(f"F{i+1}"), self,
+                      lambda k=i: self._pad_play(k))
+        self._preset_refresh()
+        self._restore_voice_ui()
+        self._wire_live()
+
+    def _wire_live(self) -> None:
+        """Live-apply mixer controls into the shared settings object so a
+        running pipeline picks them up without a restart."""
+        s = self.settings
+        self.sld_in_gain.valueChanged.connect(
+            lambda v: setattr(s, "input_gain", v / 100.0))
+        self.sld_out_gain.valueChanged.connect(
+            lambda v: setattr(s, "output_gain", v / 100.0))
+        self.sld_gate.valueChanged.connect(
+            lambda v: setattr(s, "noise_gate_db", float(v)))
+        self.sld_fx.valueChanged.connect(
+            lambda v: setattr(s, "fx_amount", v / 100.0))
+        self.cmb_fx.currentIndexChanged.connect(
+            lambda *_: setattr(s, "fx_mode",
+                               self.cmb_fx.currentData() or "off"))
+        self.chk_limiter.toggled.connect(
+            lambda v: setattr(s, "limiter", bool(v)))
+        self.chk_passthrough.toggled.connect(
+            lambda v: setattr(s, "passthrough", bool(v)))
+        self.chk_mute.toggled.connect(self._on_mute_toggled)
+
+    def _on_mute_toggled(self, v: bool) -> None:
+        self.settings.muted = bool(v)
+        if self.pipeline is not None:
+            self.pipeline.muted = bool(v)
 
     def _slider(self, lo: int, hi: int, val: int) -> QSlider:
         s = QSlider(Qt.Orientation.Horizontal)
@@ -555,6 +673,171 @@ class MainWindow(QMainWindow):
             self._log(f"{e.name} を AivisHub から導入します…")
             self._install_model(hub_uuid=e.uuid)
 
+    # ------------------------------------------------------------------ presets
+    _PRESET_KEYS = (
+        "style_id", "speed_scale", "pitch_semitones", "intonation_scale",
+        "volume_scale", "auto_speed", "auto_volume", "auto_pitch",
+        "noise_gate_db", "input_gain", "output_gain", "limiter",
+        "fx_mode", "fx_amount", "passthrough")
+
+    def _presets(self) -> dict:
+        return self.settings.extra.setdefault("presets", {})
+
+    def _preset_refresh(self) -> None:
+        self.cmb_preset.blockSignals(True)
+        self.cmb_preset.clear()
+        self.cmb_preset.addItem("(プリセット)", None)
+        for name in sorted(self._presets()):
+            self.cmb_preset.addItem(name, name)
+        self.cmb_preset.blockSignals(False)
+
+    def _collect_voice(self) -> dict:
+        return {
+            "style_id": self.cmb_style.currentData(),
+            "speed_scale": self.sld_speed.value() / 100.0,
+            "pitch_semitones": float(self.sld_pitch.value()),
+            "intonation_scale": self.sld_intonation.value() / 100.0,
+            "volume_scale": self.sld_volume.value() / 100.0,
+            "auto_speed": self.chk_auto_speed.isChecked(),
+            "auto_volume": self.chk_auto_volume.isChecked(),
+            "auto_pitch": self.chk_auto_pitch.isChecked(),
+            "noise_gate_db": float(self.sld_gate.value()),
+            "input_gain": self.sld_in_gain.value() / 100.0,
+            "output_gain": self.sld_out_gain.value() / 100.0,
+            "limiter": self.chk_limiter.isChecked(),
+            "fx_mode": self.cmb_fx.currentData() or "off",
+            "fx_amount": self.sld_fx.value() / 100.0,
+            "passthrough": self.chk_passthrough.isChecked(),
+        }
+
+    def _preset_save(self) -> None:
+        name, ok = QInputDialog.getText(
+            self, "プリセット保存", "プリセット名:")
+        name = name.strip()
+        if not ok or not name:
+            return
+        self._presets()[name] = self._collect_voice()
+        save(self.settings)
+        self._preset_refresh()
+        for i in range(self.cmb_preset.count()):
+            if self.cmb_preset.itemData(i) == name:
+                self.cmb_preset.blockSignals(True)
+                self.cmb_preset.setCurrentIndex(i)
+                self.cmb_preset.blockSignals(False)
+                break
+        self._log(f"プリセット保存: {name}")
+
+    def _preset_delete(self) -> None:
+        name = self.cmb_preset.currentData()
+        if not name:
+            return
+        self._presets().pop(name, None)
+        save(self.settings)
+        self._preset_refresh()
+        self._log(f"プリセット削除: {name}")
+
+    def _preset_apply(self) -> None:
+        name = self.cmb_preset.currentData()
+        if not name or name not in self._presets():
+            return
+        p = self._presets()[name]
+        s = self.settings
+        for k in self._PRESET_KEYS:
+            if k in p:
+                setattr(s, k, p[k])
+        self._restore_voice_ui()
+        save(s)
+        if self.pipeline is not None:
+            self._log(f"プリセット適用: {name}")
+
+    def _restore_voice_ui(self) -> None:
+        """Push persisted settings into the widgets (startup / preset apply)."""
+        s = self.settings
+        self.sld_speed.setValue(round(s.speed_scale * 100))
+        self.sld_pitch.setValue(round(s.pitch_semitones))
+        self.sld_intonation.setValue(round(s.intonation_scale * 100))
+        self.sld_volume.setValue(round(s.volume_scale * 100))
+        self.chk_auto_speed.setChecked(s.auto_speed)
+        self.chk_auto_volume.setChecked(s.auto_volume)
+        self.chk_auto_pitch.setChecked(s.auto_pitch)
+        self.sld_in_gain.setValue(round(s.input_gain * 100))
+        self.sld_out_gain.setValue(round(s.output_gain * 100))
+        self.sld_gate.setValue(round(s.noise_gate_db))
+        self.chk_limiter.setChecked(s.limiter)
+        self.sld_fx.setValue(round(s.fx_amount * 100))
+        for i in range(self.cmb_fx.count()):
+            if self.cmb_fx.itemData(i) == s.fx_mode:
+                self.cmb_fx.setCurrentIndex(i)
+                break
+        self.chk_passthrough.setChecked(s.passthrough)
+        self.chk_mute.setChecked(s.muted)
+        self.chk_monitor.setChecked(s.monitor_enabled)
+        self.chk_record.setChecked(s.record_output)
+
+    # ------------------------------------------------------------------ soundboard
+    def _pad_refresh_labels(self) -> None:
+        for i, b in enumerate(self._pad_buttons):
+            p = self._pad_paths[i]
+            name = Path(p).stem if p else "—"
+            if len(name) > 14:
+                name = name[:13] + "…"
+            b.setText(f"F{i+1}: {name}")
+            b.setToolTip(p or "クリックで音声ファイルを割り当て")
+
+    def _pad_click(self, i: int) -> None:
+        if self._pad_paths[i]:
+            self._pad_play(i)
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "サウンドを割り当て", str(Path.home()),
+            "Audio (*.wav *.mp3 *.flac *.ogg *.aiff);;All files (*)")
+        if not path:
+            return
+        self._pad_paths[i] = path
+        self.settings.extra["pads"] = list(self._pad_paths)
+        save(self.settings)
+        self._pad_refresh_labels()
+
+    def _pad_menu(self, i: int, btn: QPushButton, pos) -> None:
+        if not self._pad_paths[i]:
+            return
+        m = QMenu(self)
+        act = m.addAction("割り当て解除")
+        if act == m.exec(btn.mapToGlobal(pos)):
+            self._pad_paths[i] = ""
+            self.settings.extra["pads"] = list(self._pad_paths)
+            save(self.settings)
+            self._pad_refresh_labels()
+
+    def _pad_play(self, i: int) -> None:
+        p = self._pad_paths[i]
+        if not p or not Path(p).exists():
+            return
+        try:
+            pcm, rate = load_audio_file(p)
+        except Exception as e:
+            self._log(f"サウンド読み込み失敗: {e}")
+            return
+        if self.pipeline is not None:
+            self.pipeline.play_external(pcm, rate)
+        else:
+            from .. import paths
+
+            tmp = paths.data_dir() / "pad_preview.wav"
+            tmp.write_bytes(pcm_to_wav(pcm, rate))
+            if self._media is None:
+                self._audio_out = QAudioOutput()
+                self._media = QMediaPlayer()
+                self._media.setAudioOutput(self._audio_out)
+            self._media.setSource(QUrl.fromLocalFile(str(tmp)))
+            self._media.play()
+
+    def _open_vcable_guide(self) -> None:
+        QDesktopServices.openUrl(QUrl("https://vb-audio.com/Cable/"))
+        self._log("VB-CABLE をインストール後、「出力」に CABLE Input を"
+                  "選び、Discord/ゲーム側のマイクに CABLE Output を"
+                  "設定してください")
+
     # ------------------------------------------------------------------ run
     def _toggle(self) -> None:
         if self.pipeline is None:
@@ -583,6 +866,13 @@ class MainWindow(QMainWindow):
         s.auto_pitch = self.chk_auto_pitch.isChecked()
         s.passthrough = self.chk_passthrough.isChecked()
         s.record_output = self.chk_record.isChecked()
+        s.input_gain = self.sld_in_gain.value() / 100.0
+        s.output_gain = self.sld_out_gain.value() / 100.0
+        s.noise_gate_db = float(self.sld_gate.value())
+        s.limiter = self.chk_limiter.isChecked()
+        s.fx_mode = self.cmb_fx.currentData() or "off"
+        s.fx_amount = self.sld_fx.value() / 100.0
+        s.muted = self.chk_mute.isChecked()
         gpu_now = self.chk_gpu.isChecked()
         if gpu_now != s.use_gpu:
             s.use_gpu = gpu_now
@@ -612,6 +902,7 @@ class MainWindow(QMainWindow):
         self.btn_start.setObjectName("stop")
         self.btn_start.style().unpolish(self.btn_start)
         self.btn_start.style().polish(self.btn_start)
+        self.pipeline.muted = self.chk_mute.isChecked()
         self._log("変換を開始しました")
 
     def _stop(self) -> None:
@@ -662,7 +953,7 @@ class MainWindow(QMainWindow):
             from ..util.audio import wav_to_pcm
 
             pcm, r = wav_to_pcm(wav)
-            self.pipeline._enqueue_play(pcm, None, src_rate=r)
+            self.pipeline.play_external(pcm, r)
             self._log(f"読み上げ: {text}")
         else:
             # no pipeline running — play through Qt Multimedia
@@ -692,7 +983,8 @@ class MainWindow(QMainWindow):
         self.lbl_stats.setText(
             f"遅延: 最新 {st.last_latency_ms:.0f}ms / 平均 "
             f"{st.avg_latency_ms:.0f}ms | ASR {st.asr_ms:.0f}ms | "
-            f"TTS {st.tts_ms:.0f}ms | 発話 {st.utterances} 回")
+            f"TTS {st.tts_ms:.0f}ms | 発話 {st.utterances} 回 | "
+            f"破棄 {st.dropped_ms:.0f}ms")
 
     def _log(self, msg: str) -> None:
         ts = datetime.datetime.now().strftime("%H:%M:%S")

@@ -51,6 +51,15 @@ class Settings:
 
     record_output: bool = False
     passthrough: bool = False
+    muted: bool = False
+
+    # competitor-parity controls (w-okada VCClient / VOIDOL)
+    noise_gate_db: float = -60.0  # inputs below this are gated to silence
+    input_gain: float = 1.0
+    output_gain: float = 1.0
+    limiter: bool = True          # tanh soft-clip on output
+    fx_mode: str = "off"          # off|echo|reverb|robot
+    fx_amount: float = 0.5
 
     extra: dict[str, Any] = field(default_factory=dict)
 

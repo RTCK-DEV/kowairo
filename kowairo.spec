@@ -11,7 +11,7 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_all
 
 datas, binaries, hiddenimports = [], [], []
-for pkg in ("sherpa_onnx", "sounddevice"):
+for pkg in ("sherpa_onnx", "sounddevice", "soundfile"):
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b
