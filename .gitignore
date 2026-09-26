@@ -1,0 +1,9 @@
+.venv/
+build/
+dist/
+__pycache__/
+*.pyc
+*.wav
+*.part
+.DS_Store
+dist2/
