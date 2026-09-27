@@ -39,7 +39,7 @@ https://github.com/RTCK-reina/kowairo
 | macOS (arm64 / x64) | CPU（Metal 相当の高速化はエンジン側の将来対応） | CPU | ビルド提供 |
 | Linux x64 / arm64 | CPU | CPU | ビルド提供 |
 
-> NVIDIA CUDA を Linux で使いたい場合は、同梱エンジンをソース/Docker(nvidia) 版に差し替えるか、`faster-whisper` ASR バックエンドを選択してください（`pip install .[whisper]`）。
+> NVIDIA CUDA を Linux で使いたい場合は、同梱エンジンをソース/Docker(nvidia) 版に差し替えるか、`faster-whisper` ASR バックエンドを選択してください（`pip install .[whisper]`、CUDA を自動検出。ボイス設定の「音声認識」または `asr_backend` 設定で切替）。ピッチ推定の cuFFT 化は `pip install .[gpu]`。
 
 ## セットアップ
 

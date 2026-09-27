@@ -47,7 +47,8 @@ from PySide6.QtWidgets import (
 )
 
 from .. import paths
-from ..asr.sherpa import SherpaReazonASR, ensure_silero_vad
+from ..asr import create as create_asr
+from ..asr.sherpa import ensure_silero_vad
 from ..audio.devices import list_devices
 from ..audio.pipeline import PipelineStats, VoiceChangerPipeline
 from ..engine.client import EngineClient
@@ -118,7 +119,7 @@ class MainWindow(QMainWindow):
                                     use_gpu=self.settings.use_gpu,
                                     log=self._bridge.log.emit)
         self.client: EngineClient | None = None
-        self.asr = SherpaReazonASR(num_threads=self.settings.asr_num_threads)
+        self.asr = create_asr(self.settings)
         self.pipeline: VoiceChangerPipeline | None = None
         self._bridge.text.connect(self._on_text)
         self._bridge.level.connect(self._on_level)
@@ -210,6 +211,14 @@ class MainWindow(QMainWindow):
         vf.addRow(self.chk_auto_pitch)
         self.chk_passthrough = QCheckBox("入力をそのまま出力 (パススルー)")
         self.chk_gpu = QCheckBox("GPU で音声合成 (Windows: DirectML / 対応環境: CUDA)")
+        self.cmb_asr = QComboBox()
+        for label, key in (("ReazonSpeech (CPU・軽量)", "sherpa-reazonspeech"),
+                           ("faster-whisper (CUDA対応・高精度)", "faster-whisper")):
+            self.cmb_asr.addItem(label, key)
+        self.cmb_asr.setToolTip(
+            "faster-whisper は pip install .[whisper] が必要です。\n"
+            "GPU (CUDA) があれば自動で使い、なければ CPU int8 で動作します。\n"
+            "切替はアプリ再起動後に有効になります。")
         self.chk_interim = QCheckBox(
             "発話中に先回り合成 (中間認識・応答高速化)")
         self.chk_interim.setChecked(True)
@@ -219,6 +228,7 @@ class MainWindow(QMainWindow):
             "話し終わる前から変換音声が出始めます。")
         vf.addRow(self.chk_passthrough)
         vf.addRow(self.chk_gpu)
+        vf.addRow("音声認識", self.cmb_asr)
         vf.addRow(self.chk_interim)
         ll.addWidget(voice)
 
@@ -808,6 +818,10 @@ class MainWindow(QMainWindow):
                 self.cmb_fx.setCurrentIndex(i)
                 break
         self.chk_passthrough.setChecked(s.passthrough)
+        for i in range(self.cmb_asr.count()):
+            if self.cmb_asr.itemData(i) == s.asr_backend:
+                self.cmb_asr.setCurrentIndex(i)
+                break
         self.chk_interim.setChecked(s.interim_asr)
         self.chk_mute.setChecked(s.muted)
         self.chk_monitor.setChecked(s.monitor_enabled)
@@ -904,6 +918,13 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self, "GPU設定", "GPU設定はエンジン再起動後に有効になります。"
                 "アプリを再起動してください。")
+        asr_now = str(self.cmb_asr.currentData())
+        if asr_now != s.asr_backend:
+            s.asr_backend = asr_now
+            save(s)
+            QMessageBox.information(
+                self, "音声認識", "音声認識バックエンドの変更は"
+                "アプリ再起動後に有効になります。")
         save(s)
         if s.style_id is None:
             self._fatal("モデル未選択", "モデル管理タブでモデルを導入してください")

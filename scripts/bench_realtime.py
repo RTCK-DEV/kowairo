@@ -27,7 +27,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from kowairo.asr.sherpa import SherpaReazonASR, ensure_silero_vad
+from kowairo.asr import create as create_asr
+from kowairo.asr.sherpa import ensure_silero_vad
 from kowairo.audio.pipeline import ASR_RATE, VoiceChangerPipeline
 from kowairo.engine.manager import EngineManager
 from kowairo.settings import load
@@ -160,7 +161,8 @@ def main() -> int:
         print(f"[bench]   {(time.monotonic() - t0) * 1000:.0f}ms", flush=True)
 
         print("[bench] asr setup...", flush=True)
-        asr = SherpaReazonASR()
+        asr = create_asr(load())
+        print(f"[bench] backend={asr.name}", flush=True)
         asr.ensure_model()
         ensure_silero_vad()
         asr.load()

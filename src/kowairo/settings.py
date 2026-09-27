@@ -40,8 +40,9 @@ class Settings:
     engine_version: str = "1.2.0"
 
     # asr
-    asr_backend: str = "sherpa-reazonspeech"
+    asr_backend: str = "sherpa-reazonspeech"   # or "faster-whisper" (CUDA)
     asr_num_threads: int = 2
+    whisper_model: str = "turbo"             # faster-whisper model size/repo
 
     # pipeline
     vad_threshold: float = 0.5

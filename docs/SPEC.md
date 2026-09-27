@@ -22,10 +22,11 @@ RVC 系直接変換との本質的な差異。
 |---|---|---|
 | キャプチャ/再生 | sounddevice (PortAudio) | 16 kHz mono 入力、48 kHz 出力 |
 | VAD | Silero VAD v5 (sherpa-onnx) | 32 ms 窓、発話区間の切り出し |
-| ASR | ReazonSpeech Zipformer int8 (sherpa-onnx) | CPU 完結の日本語認識 |
-| ピッチ推定 | 自己相関法 (NumPy) | 入力 f0 → pitchScale 追従 |
+| ASR | ReazonSpeech Zipformer int8 (sherpa-onnx) | CPU 完結の日本語認識（既定） |
+| ASR (代替) | faster-whisper (CTranslate2) | `.[whisper]` extra。CUDA 自動検出、日本語以外や高精度化向け |
+| ピッチ推定 | 自己相関法 (FFT: NumPy / CuPy) | 入力 f0 → pitchScale 追従。`.[gpu]` で CUDA 上の cuFFT を使用可 |
 | TTS | AivisSpeech Engine 1.2.0 (外部プロセス) | Style-Bert-VITS2 ONNX 推論、HTTP API |
-| GPU | エンジンの `--use_gpu` | Windows: DirectML (NVIDIA/Radeon/Intel 共通)、CUDA EP 存在時は CUDA 優先。macOS/Linux は CPU |
+| GPU | エンジンの `--use_gpu` / faster-whisper CUDA / CuPy | Windows エンジン: DirectML (NVIDIA/Radeon/Intel 共通)、CUDA EP 存在時は CUDA 優先。macOS/Linux は CPU |
 | GUI | PySide6 (Qt Widgets, ダークテーマ) | デバイス選択・ボイス設定・ミキサー・ライブラリ |
 | 凍結 | PyInstaller onedir | Python 不要の単体配布 |
 
@@ -144,6 +145,8 @@ FX・パススルー・先回り合成を名前付きで保存/適用/削除
 | drop_when_behind_ms | 3000 | 遅延上限（超過分は先頭トリム） |
 | interim_asr | true | 発話中の先回り合成 |
 | interim_after_ms / interim_every_ms | 1600 / 1000 | 中間認識の開始遅延/周期 |
+| asr_backend | sherpa-reazonspeech | 音声認識エンジン（`faster-whisper` で CUDA 対応 Whisper に切替・再起動で反映） |
+| whisper_model | turbo | faster-whisper のモデルサイズ/リポジトリ |
 | asr_num_threads | 2 | ASR スレッド数 |
 | record_output | false | 録音 |
 | extra.pads / extra.presets | — | パッド割当・プリセット |
@@ -153,7 +156,10 @@ FX・パススルー・先回り合成を名前付きで保存/適用/削除
 ## 6. 性能設計（低負荷化）
 
 - VRAM 既定 0（エンジン CPU 推論; `--use_gpu` 時も DirectML 経由で専有抑制）
-- ASR は int8 量子化・CPU・2 スレッド
+- ASR は int8 量子化・CPU・2 スレッド（既定）。`faster-whisper` 選択時は
+  CUDA があれば GPU 推論（int8_float16）、なければ int8 CPU
+- ピッチ推定は FFT 自己相関をフレーム一括処理（CuPy 導入時は cuFFT へ自動切替。
+  `KOWAIRO_NO_GPU=1` で強制 CPU）
 - TTS 推論は外部エンジンプロセスに隔離（アプリ本体は音声 I/O+制御のみ）
 - 出力コールバック内は deque drain のみ（推論・ネットワークはワーカー側）
 - 想定遅延: 中間認識オンなら発話開始 ~4–6 s 後から逐次音出し（発話終了を待たない）。

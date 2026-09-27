@@ -50,6 +50,14 @@ class TestSplitClauses:
         assert "".join(out).replace("、", "", 1) or True  # sanity: non-empty
         assert sum(len(p) for p in out) > 0
 
+    def test_separator_only_tail_folded_into_previous(self):
+        # 48 chars + 。: the hard split must not drop the sentence break
+        out = split_clauses("あ" * 48 + "。")
+        assert out == ["あ" * 48 + "。"]
+        # deeper case: あ*48 。 い*48 。
+        out = split_clauses("あ" * 48 + "。" + "い" * 48 + "。")
+        assert out == ["あ" * 48 + "。", "い" * 48 + "。"]
+
 
 class TestCommonPrefix:
     def test_basic(self):

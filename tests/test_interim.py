@@ -103,6 +103,28 @@ class TestInterimCommit:
         assert _drain_clauses(p) == []
         assert 1 not in p._live
 
+    def test_full_clause_queue_retries_next_snapshot(self):
+        """PR2: committed_text must not advance when _put_clause fails,
+        so the span is retried instead of silently skipped."""
+        p, logs = _bare_pipe()
+        p._clause_q = queue.Queue(maxsize=1)
+        t1 = "あいうえおかきくけこさしすせそ"
+        p._commit_interim(_job(1), t1)
+        p._commit_interim(_job(1), t1 + "たちつてと")
+        first = p._clause_q.get_nowait()
+        # saturate the queue so the next commit can't enqueue
+        p._clause_q.put_nowait(ClauseJob("blocker", None, None, None, 0.0, 0))
+        p._commit_interim(_job(1), t1 + "たちつてとなにぬねの")
+        st = p._live[1]
+        assert st["committed_text"] == first.text
+        assert st["next_index"] == 1
+        assert any("溢れ" in m for m in logs)
+        # after draining, the same span is committed on the next snapshot
+        p._clause_q.get_nowait()
+        p._commit_interim(_job(1), t1 + "たちつてとなにぬねのはひふへほ")
+        clauses = _drain_clauses(p)
+        assert clauses and clauses[0].text.startswith("くけこ")
+
 
 class TestQueueText:
     def test_final_delta_only(self):
