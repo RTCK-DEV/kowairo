@@ -76,10 +76,14 @@ def run_cli(args) -> int:
                 flush=True))
             ensure_silero_vad()
             asr.load()
+            asr.warmup()
             print("\n[cli] asr ready", flush=True)
 
             s = load()
             s.style_id = style_id
+            t0 = time.monotonic()
+            client.synthesize("あ", style_id, output_rate=48000)
+            log(f"tts warmup {(time.monotonic() - t0) * 1000:.0f}ms")
             pipe = VoiceChangerPipeline(
                 s, client, asr, ensure_silero_vad(), on_log=log)
             pcm, texts, _stats = pipe.run_file(args.input, progress=log)

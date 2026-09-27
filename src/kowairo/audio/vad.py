@@ -4,11 +4,16 @@ Drives sherpa-onnx's ``VadModel`` frame-by-frame (32 ms windows) and performs
 hangover-based segmentation: an utterance ends after ``min_silence_ms`` of
 continuous non-speech, or is force-cut at ``max_speech_sec`` so ASR can start
 early on long monologues.
+
+While speech is ongoing, ``on_speech`` is invoked every ``interim_every_ms``
+(starting at ``interim_after_ms``) with a snapshot of the accumulated segment
+so callers can run interim ASR and start synthesis before the endpoint — the
+counterpart of chunk-streamed output in direct-conversion voice changers.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import numpy as np
@@ -20,7 +25,10 @@ WINDOW = 512  # silero v5 window @16kHz (32 ms)
 class VadSegmenter:
     def __init__(self, model_path: Path, threshold: float = 0.5,
                  min_silence_ms: int = 450, min_speech_ms: int = 160,
-                 max_speech_sec: float = 15.0, sample_rate: int = 16000) -> None:
+                 max_speech_sec: float = 15.0, sample_rate: int = 16000,
+                 on_speech: Callable[[np.ndarray], None] | None = None,
+                 interim_after_ms: int = 1600,
+                 interim_every_ms: int = 1000) -> None:
         cfg = sherpa_onnx.VadModelConfig()
         cfg.silero_vad.model = str(model_path)
         cfg.silero_vad.threshold = threshold
@@ -46,6 +54,10 @@ class VadSegmenter:
         self._pos = 0           # absolute stream position (samples)
         self._buf = np.zeros(0, dtype=np.float32)
         self._pending: list[np.ndarray] = []
+        self._on_speech = on_speech
+        self._interim_after = int(interim_after_ms / 1000.0 * sample_rate)
+        self._interim_every = int(interim_every_ms / 1000.0 * sample_rate)
+        self._next_interim = 0  # abs sample pos of the next interim snapshot
 
     def feed(self, pcm: np.ndarray) -> Iterator[np.ndarray]:
         """Accept arbitrary-length PCM; yield completed utterance segments."""
@@ -61,6 +73,7 @@ class VadSegmenter:
                     self._in_speech = True
                     self._seg_start = self._pos
                     self._pending.clear()
+                    self._next_interim = self._pos + self._interim_after
                 self._sil_start = None
             else:
                 if self._in_speech:
@@ -77,6 +90,10 @@ class VadSegmenter:
                     yield seg
             if self._in_speech:
                 self._pending.append(frame)
+                if (self._on_speech is not None
+                        and frame_end >= self._next_interim):
+                    self._next_interim = frame_end + self._interim_every
+                    self._on_speech(np.concatenate(self._pending))
             self._pos = frame_end
         self._buf = self._buf[n_full * self.win:]
 

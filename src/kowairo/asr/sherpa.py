@@ -87,6 +87,11 @@ class SherpaReazonASR:
             debug=False,
         )
 
+    def warmup(self) -> None:
+        """Run one throwaway decode so the first real utterance is not slowed
+        by ONNX session/arena initialization (competitor engines pre-warm)."""
+        self.transcribe(np.zeros(16000 // 2, np.float32), 16000)
+
     # ------------------------------------------------------------ inference
     def transcribe(self, pcm: np.ndarray, sample_rate: int = 16000) -> str:
         if self._recognizer is None:
