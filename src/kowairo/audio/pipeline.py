@@ -128,8 +128,17 @@ def split_clauses(text: str, max_len: int = 48) -> list[str]:
         while len(p) > max_len:
             out.append(p[:max_len])
             p = p[max_len:]
-        out.append(p)
-    return [p for p in out if p.strip("。、！？!?, \n")]
+        if p:
+            out.append(p)
+    # a hard split can leave a separator-only tail (…48字|。); fold it into
+    # the previous chunk so the sentence break still reaches the synthesizer
+    merged = out[:1]
+    for p in out[1:]:
+        if p.strip("。、！？!?, \n"):
+            merged.append(p)
+        else:
+            merged[-1] += p
+    return [p for p in merged if p.strip("。、！？!?, \n")]
 
 
 def _common_prefix_len(a: str, b: str) -> int:
@@ -212,7 +221,7 @@ class VoiceChangerPipeline:
             min_silence_ms=s.vad_min_silence_ms,
             min_speech_ms=s.vad_min_speech_ms,
             max_speech_sec=s.max_speech_sec,
-            on_speech=self._on_vad_progress if s.interim_asr else None,
+            on_speech=self._on_vad_progress,
             interim_after_ms=s.interim_after_ms,
             interim_every_ms=s.interim_every_ms,
         )
@@ -225,8 +234,8 @@ class VoiceChangerPipeline:
         self._spawn(self._asr_worker, "asr")
         self._spawn(self._tts_worker, "tts")
         self._spawn(self._play_worker, "play")
-        if self.settings.interim_asr:
-            self._spawn(self._interim_worker, "interim")
+        # always spawned so toggling interim_asr mid-run takes effect
+        self._spawn(self._interim_worker, "interim")
         try:
             if with_io:
                 self._open_output()
@@ -349,8 +358,8 @@ class VoiceChangerPipeline:
         """VAD in-speech snapshot (capture thread) — queue for interim ASR.
         Only the freshest snapshot matters; drop when one is pending or the
         interim worker is still decoding."""
-        if self._stop.is_set() or self._interim_busy \
-                or not self._interim_q.empty():
+        if not self.settings.interim_asr or self._stop.is_set() \
+                or self._interim_busy or not self._interim_q.empty():
             return
         with contextlib.suppress(queue.Full):
             self._interim_q.put_nowait(
@@ -468,21 +477,25 @@ class VoiceChangerPipeline:
                 return
             # commit at most _INTERIM_MAX_DELTA per snapshot so a clause's
             # audio stays under the drop-to-live-edge cap; committed_text
-            # always stays an exact prefix of stable (separators consumed)
+            # always stays an exact prefix of stable — separators stay in
+            # the delta so sentence breaks reach the synthesizer
             tail = stable[len(committed):]
-            stripped = tail.lstrip("、。 ")
-            delta = stripped[:_INTERIM_MAX_DELTA]
-            if not delta:
+            delta = tail[:_INTERIM_MAX_DELTA]
+            if not delta.strip("、。 "):
                 return
-            n = len(committed) + (len(tail) - len(stripped)) + len(delta)
-            st["committed_text"] = stable[:n]
-            self.on_log(f"先回り合成: {delta}")
-            self._put_clause(ClauseJob(
+            n = len(committed) + len(delta)
+            cj = ClauseJob(
                 delta, pros[0], pros[1], pros[2],
                 job.t_snap, st["next_index"],
                 seq=job.seq, interim=True,
-                speech_start=job.t_snap - dur))
+                speech_start=job.t_snap - dur)
+            if not self._put_clause(cj):
+                # full queue: leave committed_text so the next snapshot
+                # retries this span instead of silently skipping it
+                return
+            st["committed_text"] = stable[:n]
             st["next_index"] += 1
+            self.on_log(f"先回り合成: {delta}")
 
     def _queue_text(self, text: str, utt: Utterance) -> None:
         s = self.settings
@@ -531,11 +544,13 @@ class VoiceChangerPipeline:
             pitch = None
         return speed, volume, pitch
 
-    def _put_clause(self, job: ClauseJob) -> None:
+    def _put_clause(self, job: ClauseJob) -> bool:
         try:
             self._clause_q.put_nowait(job)
+            return True
         except queue.Full:
             self.on_log("TTSキュー溢れ: 文節を破棄")
+            return False
 
     # ------------------------------------------------------------ TTS
     def _tts_worker(self) -> None:

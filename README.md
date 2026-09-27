@@ -21,7 +21,7 @@ https://github.com/RTCK-reina/kowairo
 
 - **高品質・高音質**: Style-Bert-VITS2 (JP-Extra) による感情豊かな 44.1/48 kHz 音声合成。出力は 48 kHz モノラル。
 - **低 VRAM / 低負荷**: 既定は完全 CPU 動作（VRAM 0 MB）。ASR は int8 量子化 Zipformer（~160MB）、TTS は ONNX Runtime。
-- **高リアルタイム性**: 発話終了から文節単位で合成を先回りして逐次再生。発話終了→発声開始まで実測 ~1 秒前後（CPU）。
+- **高リアルタイム性**: 発話中から中間認識の安定部分を逐次合成・再生（先回り合成、ON/OFF 可）。発話開始→初音まで実測 ~5 秒（CPU、モデルウォームアップ済み）。
 - **GPU 対応（オプション）**: エンジンの `--use_gpu` で Windows は DirectML（NVIDIA/AMD Radeon/Intel すべて対象）、CUDA EP が存在する環境では CUDA を優先利用。macOS/Linux は CPU 実行（Style-Bert-VITS2 の ONNX は CPU でも実時間より十分高速です）。
 - **スタンドアロン GUI**: PySide6 製デスクトップアプリ。PyInstaller で Windows/macOS/Linux の単一実行ファイルにパッケージ可能。
 - **ASR 結果のプロソディ反映**: 入力の話速・音量・（任意で）ピッチを合成パラメータへ自動マッピング。
@@ -146,4 +146,4 @@ scripts/build_windows.ps1          # Windows (PowerShell)
 
 - ASR→TTS 型のため、**声の抑揚・感情は完全には引き継がれません**（話速・音量・ピッチは概ね反映）。
 - 日本語専用の認識・合成です。
-- 発話中のリアルタイム逐次変換ではなく、発話区間（数秒）ごとの変換です。
+- ASR→TTS カスケードのため初音まで数秒かかります（音声→音声直接変換の製品より初動は遅い）。発話中から文節単位で逐次出音します。

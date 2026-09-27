@@ -439,6 +439,8 @@ class MainWindow(QMainWindow):
             lambda v: setattr(s, "limiter", bool(v)))
         self.chk_passthrough.toggled.connect(
             lambda v: setattr(s, "passthrough", bool(v)))
+        self.chk_interim.toggled.connect(
+            lambda v: setattr(s, "interim_asr", bool(v)))
         self.chk_mute.toggled.connect(self._on_mute_toggled)
 
     def _on_mute_toggled(self, v: bool) -> None:
@@ -1016,7 +1018,7 @@ class MainWindow(QMainWindow):
     def _on_stats(self, st: PipelineStats) -> None:
         self.lbl_stats.setText(
             f"応答: 最新 {st.last_respond_ms:.0f}ms / 平均 "
-            f"{st.avg_respond_ms:.0f}ms | 終端→音声: "
+            f"{st.avg_respond_ms:.0f}ms | 確定→音声: "
             f"{st.last_latency_ms:.0f}ms | ASR {st.asr_ms:.0f}ms | "
             f"TTS {st.tts_ms:.0f}ms | 発話 {st.utterances} 回 | "
             f"破棄 {st.dropped_ms:.0f}ms")
