@@ -7,7 +7,8 @@ from pathlib import Path
 import httpx
 from PySide6.QtCore import QThread, Signal
 
-from ..asr.sherpa import SherpaReazonASR, ensure_silero_vad
+from ..asr.base import ASRBackend
+from ..asr.sherpa import ensure_silero_vad
 from ..engine.client import EngineClient
 from ..engine.manager import EngineManager
 from ..models import hub
@@ -113,10 +114,10 @@ class ThumbFetchWorker(QThread):
 
 class AsrSetupWorker(QThread):
     progress = Signal(str, int, int)
-    done = Signal(object)    # SherpaReazonASR
+    done = Signal(object)    # ASRBackend
     failed = Signal(str)
 
-    def __init__(self, asr: SherpaReazonASR) -> None:
+    def __init__(self, asr: ASRBackend) -> None:
         super().__init__()
         self.asr = asr
 

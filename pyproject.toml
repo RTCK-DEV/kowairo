@@ -19,7 +19,18 @@ dependencies = [
 
 [project.optional-dependencies]
 # NVIDIA CUDA ASR backend (optional; TTS GPU is handled by the embedded engine via DirectML/CUDA)
-whisper = ["faster-whisper>=1.1.0"]
+whisper = [
+    "faster-whisper>=1.1.0",
+    # cuBLAS DLLs for ctranslate2 CUDA (inference needs cublas64_12 + cublasLt64_12;
+    # cuDNN is statically linked into CT2 so nvidia-cudnn-cu12 is NOT needed)
+    "nvidia-cublas-cu12; sys_platform=='win32' or sys_platform=='linux'",
+]
+gpu = [
+    # optional CUDA array backend for GPU pitch/FFT paths
+    # (cupy-cuda12x ships only the runtime shim; cuFFT comes from its own wheel)
+    "cupy-cuda12x>=13.0; sys_platform=='win32' or sys_platform=='linux'",
+    "nvidia-cufft-cu12; sys_platform=='win32' or sys_platform=='linux'",
+]
 dev = ["pytest>=8.0", "ruff>=0.6.0", "pyinstaller>=6.10"]
 
 [project.scripts]

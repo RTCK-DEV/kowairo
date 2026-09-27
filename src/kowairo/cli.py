@@ -5,7 +5,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from .asr.sherpa import SherpaReazonASR, ensure_silero_vad
+from .asr import create as create_asr
+from .asr.sherpa import ensure_silero_vad
 from .audio.pipeline import VoiceChangerPipeline
 from .engine.manager import EngineManager
 from .models import hub
@@ -69,8 +70,9 @@ def run_cli(args) -> int:
             return 0
 
         if args.input:
-            asr = SherpaReazonASR()
-            print("[cli] asr setup...", flush=True)
+            s = load()
+            asr = create_asr(s)
+            print(f"[cli] asr setup ({asr.name})...", flush=True)
             asr.ensure_model(progress=lambda r, t: print(
                 f"\r[cli] asr dl {r/1e6:.0f}/{t/1e6:.0f}MB", end="",
                 flush=True))
@@ -79,7 +81,6 @@ def run_cli(args) -> int:
             asr.warmup()
             print("\n[cli] asr ready", flush=True)
 
-            s = load()
             s.style_id = style_id
             t0 = time.monotonic()
             client.synthesize("あ", style_id, output_rate=48000)

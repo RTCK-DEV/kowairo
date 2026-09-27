@@ -32,14 +32,25 @@ def wait_port(host: str, port: int, timeout: float = 60.0) -> bool:
 
 def download(url: str, dest: Path, progress: ProgressCb | None = None,
              timeout: float = 600.0) -> Path:
-    """Download `url` to `dest` atomically (writes .part then renames)."""
+    """Download `url` to `dest` atomically (writes .part then renames).
+
+    A leftover `.part` from an aborted run is resumed via a Range request;
+    if the server ignores it (200 instead of 206) the file is restarted.
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_suffix(dest.suffix + ".part")
-    received = 0
-    with httpx.stream("GET", url, follow_redirects=True, timeout=timeout) as r:
+    resume = part.stat().st_size if part.exists() else 0
+    headers = {"Range": f"bytes={resume}-"} if resume else {}
+    with httpx.stream("GET", url, follow_redirects=True, timeout=timeout,
+                      headers=headers) as r:
         r.raise_for_status()
+        if resume and r.status_code != httpx.codes.PARTIAL_CONTENT:
+            resume = 0  # server ignored the Range header — restart
         total = int(r.headers.get("content-length", "0") or 0)
-        with part.open("wb") as f:
+        if total:
+            total += resume
+        received = resume
+        with part.open("ab" if resume else "wb") as f:
             for chunk in r.iter_bytes(1 << 20):
                 f.write(chunk)
                 received += len(chunk)

@@ -77,6 +77,69 @@ class _InterimJob:
     t_snap: float             # monotonic time the snapshot was taken
 
 
+_EMPTY = np.zeros(0, np.float32)
+LEVEL_NONE = float("nan")  # on_level sentinel: "this side did not change"
+
+
+class _PlayBuf:
+    """Bounded PCM playback queue drained by an audio callback.
+
+    `pending` counts samples still queued in `chunks` (the in-flight `cur`
+    chunk is already subtracted). Both `push` and `drain` take `self._lock`
+    around the popleft/append so the callback thread and the producer never
+    race.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.chunks: deque[np.ndarray] = deque()
+        self.cur = _EMPTY
+        self.pos = 0
+        self.pending = 0
+
+    def push(self, pcm: np.ndarray, cap: int) -> int:
+        """Append a chunk and drop the oldest samples beyond `cap`
+        (sample granularity — dropping a whole clause would silence the
+        output whenever one clause exceeds the cap). Returns dropped count."""
+        with self._lock:
+            self.chunks.append(pcm)
+            self.pending += pcm.size
+            dropped = 0
+            excess = self.pending - cap
+            while excess > 0 and self.chunks:
+                old = self.chunks[0]
+                if old.size <= excess:
+                    self.chunks.popleft()
+                    self.pending -= old.size
+                    dropped += old.size
+                    excess -= old.size
+                else:
+                    self.chunks[0] = old[excess:]
+                    self.pending -= excess
+                    dropped += excess
+                    excess = 0
+            return dropped
+
+    def drain(self, out: np.ndarray) -> None:
+        """Fill 1-D float32 `out` with queued audio; zero-fill the rest."""
+        n = out.shape[0]
+        written = 0
+        while written < n:
+            if self.pos >= self.cur.size:
+                with self._lock:
+                    self.cur = self.chunks.popleft() if self.chunks else _EMPTY
+                    self.pending -= self.cur.size
+                self.pos = 0
+                if self.cur.size == 0:
+                    break
+            take = min(n - written, self.cur.size - self.pos)
+            out[written:written + take] = self.cur[self.pos:self.pos + take]
+            self.pos += take
+            written += take
+        if written < n:
+            out[written:] = 0.0
+
+
 @dataclass
 class PipelineStats:
     utterances: int = 0
@@ -200,15 +263,8 @@ class VoiceChangerPipeline:
         self._out_stream: sd.OutputStream | None = None
         self._monitor_stream: sd.OutputStream | None = None
         self._in_rate = ASR_RATE
-        self._playbuf: deque[np.ndarray] = deque()
-        self._monbuf: deque[np.ndarray] = deque()
-        self._playbuf_samples = 0
-        self._monbuf_samples = 0
-        self._buf_lock = threading.Lock()
-        self._cur = np.zeros(0, np.float32)
-        self._cur_pos = 0
-        self._cur_mon = np.zeros(0, np.float32)
-        self._cur_mon_pos = 0
+        self._playbuf = _PlayBuf()
+        self._monbuf = _PlayBuf()
         self._out_rate = TTS_RATE
         self._fx: FxChain | None = None
         self.muted = False
@@ -273,8 +329,15 @@ class VoiceChangerPipeline:
         self._in_stream = self._out_stream = self._monitor_stream = None
         for q in (self._utter_q, self._clause_q, self._play_q,
                   self._interim_q):
-            with contextlib.suppress(queue.Full):
-                q.put(None, timeout=0.5)
+            # a full queue would drop the sentinel and leave the worker
+            # parked on get() — evict one item to make room, then retry
+            while True:
+                try:
+                    q.put_nowait(None)
+                    break
+                except queue.Full:
+                    with contextlib.suppress(queue.Empty):
+                        q.get_nowait()
         for t in self._threads:
             t.join(timeout=3)
         self._threads.clear()
@@ -326,7 +389,7 @@ class VoiceChangerPipeline:
         if s.input_gain != 1.0:
             pcm = np.clip(pcm * np.float32(s.input_gain), -1.0, 1.0)
         db = rms_db(pcm)
-        self.on_level(db, -1.0)
+        self.on_level(db, LEVEL_NONE)
         if self.muted or db < s.noise_gate_db:
             # keep VAD timing alive (feed silence) so in-flight utterances
             # endpoint normally; passthrough emits silence instead of noise
@@ -381,11 +444,7 @@ class VoiceChangerPipeline:
 
     def flush(self) -> None:
         for seg in self.vad.flush():
-            self._seq += 1
-            utt = Utterance(seg, time.monotonic(), seq=self._seq)
-            with contextlib.suppress(queue.Full):
-                self._utter_q.put(utt, timeout=2)
-                self.on_utterance(utt)
+            self._offer_utterance(seg)
 
     # ------------------------------------------------------------ ASR
     def _asr_worker(self) -> None:
@@ -601,8 +660,7 @@ class VoiceChangerPipeline:
         while not self._stop.is_set():
             t0 = time.monotonic()
             out = np.zeros((block, 1), np.float32)
-            self._drain(out, "_cur", "_cur_pos", self._playbuf,
-                        "_playbuf_samples")
+            self._playbuf.drain(out[:, 0])
             dt = time.monotonic() - t0
             time.sleep(max(0.0, 0.02 - dt))
 
@@ -661,40 +719,11 @@ class VoiceChangerPipeline:
             pcm = resample(pcm, src_rate, self._out_rate)
         pcm = self._postprocess(pcm)
         cap = int(self._out_rate * self.settings.drop_when_behind_ms / 1000)
-        with self._buf_lock:
-            self._playbuf.append(pcm)
-            self._playbuf_samples += pcm.size
-            if self._monitor_stream is not None:
-                self._monbuf.append(pcm)
-                self._monbuf_samples += pcm.size
-            # drop-to-live-edge at sample granularity: competitors drop
-            # small chunks, and dropping a whole clause would silence the
-            # output whenever one clause exceeds the cap
-            excess = self._playbuf_samples - cap
-            while excess > 0 and self._playbuf:
-                old = self._playbuf[0]
-                if old.size <= excess:
-                    self._playbuf.popleft()
-                    self._playbuf_samples -= old.size
-                    self.stats.dropped_ms += (
-                        old.size / self._out_rate * 1000)
-                    excess -= old.size
-                else:
-                    self._playbuf[0] = old[excess:]
-                    self._playbuf_samples -= excess
-                    self.stats.dropped_ms += excess / self._out_rate * 1000
-                    excess = 0
-            excess = self._monbuf_samples - cap
-            while excess > 0 and self._monbuf:
-                old = self._monbuf[0]
-                if old.size <= excess:
-                    self._monbuf.popleft()
-                    self._monbuf_samples -= old.size
-                    excess -= old.size
-                else:
-                    self._monbuf[0] = old[excess:]
-                    self._monbuf_samples -= excess
-                    excess = 0
+        dropped = self._playbuf.push(pcm, cap)
+        if self._monitor_stream is not None:
+            self._monbuf.push(pcm, cap)
+        if dropped:
+            self.stats.dropped_ms += dropped / self._out_rate * 1000
         if job is not None and job.index == 0:
             now = time.monotonic()
             lat = (now - job.utterance_end) * 1000
@@ -712,40 +741,12 @@ class VoiceChangerPipeline:
             self.on_stats(self.stats)
         self.on_play(job, pcm)
 
-    def _drain(self, outdata: np.ndarray, cur_attr: str, pos_attr: str,
-               buf: deque[np.ndarray], cnt_attr: str) -> float:
-        n = outdata.shape[0]
-        written = 0
-        cur: np.ndarray = getattr(self, cur_attr)
-        pos: int = getattr(self, pos_attr)
-        while written < n:
-            if pos >= cur.size:
-                with self._buf_lock:
-                    cur = buf.popleft() if buf else np.zeros(0, np.float32)
-                    if cur.size:
-                        setattr(self, cnt_attr,
-                                getattr(self, cnt_attr) - cur.size)
-                pos = 0
-                if cur.size == 0:
-                    break
-            take = min(n - written, cur.size - pos)
-            outdata[written:written + take, 0] = cur[pos:pos + take]
-            pos += take
-            written += take
-        setattr(self, cur_attr, cur)
-        setattr(self, pos_attr, pos)
-        if written < n:
-            outdata[written:, 0] = 0.0
-        return rms_db(outdata[:, 0])
-
     def _on_out(self, outdata, frames, t, status) -> None:
-        db = self._drain(outdata, "_cur", "_cur_pos", self._playbuf,
-                         "_playbuf_samples")
-        self.on_level(-1.0, db)
+        self._playbuf.drain(outdata[:, 0])
+        self.on_level(LEVEL_NONE, rms_db(outdata[:, 0]))
 
     def _on_out_monitor(self, outdata, frames, t, status) -> None:
-        self._drain(outdata, "_cur_mon", "_cur_mon_pos", self._monbuf,
-                    "_monbuf_samples")
+        self._monbuf.drain(outdata[:, 0])
 
     # ------------------------------------------------------------ file mode
     def run_file(self, in_wav: Path,

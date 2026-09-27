@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import math
 import threading
 from pathlib import Path
 
@@ -45,13 +46,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..asr.sherpa import SherpaReazonASR, ensure_silero_vad
+from .. import paths
+from ..asr import create as create_asr
+from ..asr.sherpa import ensure_silero_vad
 from ..audio.devices import list_devices
 from ..audio.pipeline import PipelineStats, VoiceChangerPipeline
 from ..engine.client import EngineClient
 from ..engine.manager import EngineManager
 from ..settings import Settings, save
-from ..util.audio import load_audio_file, pcm_to_wav
+from ..util.audio import load_audio_file, pcm_to_wav, wav_to_pcm
 from .workers import (
     AsrSetupWorker,
     EngineSetupWorker,
@@ -68,6 +71,7 @@ class _Bridge(QObject):
     text = Signal(str)
     level = Signal(float, float)
     stats = Signal(object)
+    speak_wav = Signal(bytes)
 
 
 class LevelMeter(QWidget):
@@ -115,11 +119,12 @@ class MainWindow(QMainWindow):
                                     use_gpu=self.settings.use_gpu,
                                     log=self._bridge.log.emit)
         self.client: EngineClient | None = None
-        self.asr = SherpaReazonASR(num_threads=self.settings.asr_num_threads)
+        self.asr = create_asr(self.settings)
         self.pipeline: VoiceChangerPipeline | None = None
         self._bridge.text.connect(self._on_text)
         self._bridge.level.connect(self._on_level)
         self._bridge.stats.connect(self._on_stats)
+        self._bridge.speak_wav.connect(self._on_speak_wav)
         self._workers: list = []
         self._record_chunks: list[np.ndarray] = []
         self._lib_entries: list = []
@@ -206,6 +211,14 @@ class MainWindow(QMainWindow):
         vf.addRow(self.chk_auto_pitch)
         self.chk_passthrough = QCheckBox("入力をそのまま出力 (パススルー)")
         self.chk_gpu = QCheckBox("GPU で音声合成 (Windows: DirectML / 対応環境: CUDA)")
+        self.cmb_asr = QComboBox()
+        for label, key in (("ReazonSpeech (CPU・軽量)", "sherpa-reazonspeech"),
+                           ("faster-whisper (CUDA対応・高精度)", "faster-whisper")):
+            self.cmb_asr.addItem(label, key)
+        self.cmb_asr.setToolTip(
+            "faster-whisper は pip install .[whisper] が必要です。\n"
+            "GPU (CUDA) があれば自動で使い、なければ CPU int8 で動作します。\n"
+            "切替はアプリ再起動後に有効になります。")
         self.chk_interim = QCheckBox(
             "発話中に先回り合成 (中間認識・応答高速化)")
         self.chk_interim.setChecked(True)
@@ -215,6 +228,7 @@ class MainWindow(QMainWindow):
             "話し終わる前から変換音声が出始めます。")
         vf.addRow(self.chk_passthrough)
         vf.addRow(self.chk_gpu)
+        vf.addRow("音声認識", self.cmb_asr)
         vf.addRow(self.chk_interim)
         ll.addWidget(voice)
 
@@ -804,6 +818,10 @@ class MainWindow(QMainWindow):
                 self.cmb_fx.setCurrentIndex(i)
                 break
         self.chk_passthrough.setChecked(s.passthrough)
+        for i in range(self.cmb_asr.count()):
+            if self.cmb_asr.itemData(i) == s.asr_backend:
+                self.cmb_asr.setCurrentIndex(i)
+                break
         self.chk_interim.setChecked(s.interim_asr)
         self.chk_mute.setChecked(s.muted)
         self.chk_monitor.setChecked(s.monitor_enabled)
@@ -856,8 +874,6 @@ class MainWindow(QMainWindow):
         if self.pipeline is not None:
             self.pipeline.play_external(pcm, rate)
         else:
-            from .. import paths
-
             tmp = paths.data_dir() / "pad_preview.wav"
             tmp.write_bytes(pcm_to_wav(pcm, rate))
             if self._media is None:
@@ -891,23 +907,9 @@ class MainWindow(QMainWindow):
         s.monitor_enabled = self.chk_monitor.isChecked()
         s.monitor_device = str(self.cmb_monitor.currentData()) \
             if self.cmb_monitor.currentData() is not None else None
-        s.style_id = self.cmb_style.currentData()
-        s.speed_scale = self.sld_speed.value() / 100.0
-        s.pitch_semitones = float(self.sld_pitch.value())
-        s.intonation_scale = self.sld_intonation.value() / 100.0
-        s.volume_scale = self.sld_volume.value() / 100.0
-        s.auto_speed = self.chk_auto_speed.isChecked()
-        s.auto_volume = self.chk_auto_volume.isChecked()
-        s.auto_pitch = self.chk_auto_pitch.isChecked()
-        s.passthrough = self.chk_passthrough.isChecked()
-        s.interim_asr = self.chk_interim.isChecked()
+        for k, v in self._collect_voice().items():
+            setattr(s, k, v)
         s.record_output = self.chk_record.isChecked()
-        s.input_gain = self.sld_in_gain.value() / 100.0
-        s.output_gain = self.sld_out_gain.value() / 100.0
-        s.noise_gate_db = float(self.sld_gate.value())
-        s.limiter = self.chk_limiter.isChecked()
-        s.fx_mode = self.cmb_fx.currentData() or "off"
-        s.fx_amount = self.sld_fx.value() / 100.0
         s.muted = self.chk_mute.isChecked()
         gpu_now = self.chk_gpu.isChecked()
         if gpu_now != s.use_gpu:
@@ -916,6 +918,13 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self, "GPU設定", "GPU設定はエンジン再起動後に有効になります。"
                 "アプリを再起動してください。")
+        asr_now = str(self.cmb_asr.currentData())
+        if asr_now != s.asr_backend:
+            s.asr_backend = asr_now
+            save(s)
+            QMessageBox.information(
+                self, "音声認識", "音声認識バックエンドの変更は"
+                "アプリ再起動後に有効になります。")
         save(s)
         if s.style_id is None:
             self._fatal("モデル未選択", "モデル管理タブでモデルを導入してください")
@@ -946,8 +955,6 @@ class MainWindow(QMainWindow):
             self.pipeline.stop()
             self.pipeline = None
         if self._record_chunks:
-            from .. import paths
-
             out = np.concatenate(self._record_chunks)
             paths.recordings_dir().mkdir(parents=True, exist_ok=True)
             name = "kowairo-" + datetime.datetime.now().strftime(
@@ -974,27 +981,32 @@ class MainWindow(QMainWindow):
         if style is None:
             return
         s = self.settings
-        try:
-            wav = self.client.synthesize(
-                text, int(style),
-                speed_scale=s.speed_scale,
-                pitch_scale=s.pitch_scale + s.pitch_semitones * 0.0125,
-                intonation_scale=s.intonation_scale,
-                volume_scale=s.volume_scale,
-                output_rate=48000)
-        except Exception as e:
-            self._log(f"合成エラー: {e}")
-            return
-        if self.pipeline is not None:
-            from ..util.audio import wav_to_pcm
+        client = self.client
+        pitch = s.pitch_scale + s.pitch_semitones * 0.0125
 
+        def run() -> None:
+            # engine HTTP round-trip takes ~0.2–0.5 s warm and much longer
+            # cold — never block the UI thread on it
+            try:
+                wav = client.synthesize(
+                    text, int(style),
+                    speed_scale=s.speed_scale, pitch_scale=pitch,
+                    intonation_scale=s.intonation_scale,
+                    volume_scale=s.volume_scale, output_rate=48000)
+            except Exception as e:
+                self._bridge.log.emit(f"合成エラー: {e}")
+                return
+            self._bridge.log.emit(f"読み上げ: {text}")
+            self._bridge.speak_wav.emit(wav)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_speak_wav(self, wav: bytes) -> None:
+        if self.pipeline is not None:
             pcm, r = wav_to_pcm(wav)
             self.pipeline.play_external(pcm, r)
-            self._log(f"読み上げ: {text}")
         else:
             # no pipeline running — play through Qt Multimedia
-            from .. import paths
-
             tmp = paths.data_dir() / "preview.wav"
             tmp.write_bytes(wav)
             if self._media is None:
@@ -1003,16 +1015,16 @@ class MainWindow(QMainWindow):
                 self._media.setAudioOutput(self._audio_out)
             self._media.setSource(QUrl.fromLocalFile(str(tmp)))
             self._media.play()
-            self._log(f"読み上げ: {text}")
 
     # ------------------------------------------------------------------ events
     def _on_text(self, text: str) -> None:
         self.txt_transcript.append(text)
 
     def _on_level(self, in_db: float, out_db: float) -> None:
-        if in_db > -1:
+        # pipeline passes NaN for the side that did not change
+        if not math.isnan(in_db):
             self.meter_in.set_db(in_db)
-        if out_db > -1:
+        if not math.isnan(out_db):
             self.meter_out.set_db(out_db)
 
     def _on_stats(self, st: PipelineStats) -> None:

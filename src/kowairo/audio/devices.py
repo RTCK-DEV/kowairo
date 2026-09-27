@@ -48,16 +48,3 @@ def input_devices() -> list[AudioDevice]:
 
 def output_devices() -> list[AudioDevice]:
     return [d for d in list_devices() if d.max_outputs > 0]
-
-
-def find_device(name_or_index: str | None, outputs: bool) -> int | None:
-    if name_or_index is None:
-        return None
-    try:
-        return int(name_or_index)
-    except (ValueError, TypeError):
-        pass
-    for d in list_devices():
-        if d.name == name_or_index:
-            return d.index
-    return None

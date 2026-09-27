@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -134,4 +135,14 @@ def download_model(uuid: str, progress: ProgressCb | None = None,
     dest = paths.models_dir() / "hub" / f"{safe}-{uuid[:8]}.aivmx"
     if not dest.exists():
         download(download_url(uuid, model_type), dest, progress)
+        expected = next(
+            (f.checksum for f in info.files if f.model_type == model_type),
+            "")
+        expected = expected.lower().removeprefix("sha256:")
+        if expected:
+            got = hashlib.sha256(dest.read_bytes()).hexdigest()
+            if got != expected:
+                dest.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"モデルファイルのチェックサム不一致: {got} != {expected}")
     return dest

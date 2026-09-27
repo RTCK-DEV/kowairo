@@ -8,8 +8,6 @@ import wave
 import numpy as np
 import soxr
 
-TARGET_ASR_RATE = 16000
-
 
 def wav_to_pcm(data: bytes) -> tuple[np.ndarray, int]:
     """Decode a WAV byte-string to (float32 mono PCM, sample_rate)."""

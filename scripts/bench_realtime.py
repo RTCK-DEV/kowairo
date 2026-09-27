@@ -27,7 +27,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from kowairo.asr.sherpa import SherpaReazonASR, ensure_silero_vad
+from kowairo.asr import create as create_asr
+from kowairo.asr.sherpa import ensure_silero_vad
 from kowairo.audio.pipeline import ASR_RATE, VoiceChangerPipeline
 from kowairo.engine.manager import EngineManager
 from kowairo.settings import load
@@ -96,7 +97,7 @@ def run_once(args, client, asr, vad_model, pcm_in: np.ndarray) -> dict:
         idle_since = None
         while time.monotonic() < deadline:
             pending = (pipe._clause_q.qsize() + pipe._play_q.qsize()
-                       + pipe._playbuf_samples + pipe._utter_q.qsize()
+                       + pipe._playbuf.pending + pipe._utter_q.qsize()
                        + pipe._interim_q.qsize())
             if pending == 0:
                 idle_since = idle_since or time.monotonic()
@@ -160,7 +161,8 @@ def main() -> int:
         print(f"[bench]   {(time.monotonic() - t0) * 1000:.0f}ms", flush=True)
 
         print("[bench] asr setup...", flush=True)
-        asr = SherpaReazonASR()
+        asr = create_asr(load())
+        print(f"[bench] backend={asr.name}", flush=True)
         asr.ensure_model()
         ensure_silero_vad()
         asr.load()

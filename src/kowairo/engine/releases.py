@@ -20,9 +20,7 @@ DOWNLOAD_BASE = f"https://github.com/{GITHUB_REPO}/releases/download/{{tag}}"
 class EngineAsset:
     tag: str
     archive_name: str
-    checksum_name: str
     url: str
-    checksum_url: str
     executable: str  # relative path inside the extracted tree
 
 
@@ -42,13 +40,10 @@ def asset_for(version: str, sys_key: str | None = None) -> EngineAsset:
     key = sys_key or platform_key()
     tag = version.lstrip("v")
     archive = f"AivisSpeech-Engine-{key}-{tag}.7z.001"
-    checksum = f"AivisSpeech-Engine-{key}-{tag}.7z.txt"
     exe = "run.exe" if key.startswith("Windows") else "run"
     return EngineAsset(
         tag=tag,
         archive_name=archive,
-        checksum_name=checksum,
         url=f"{DOWNLOAD_BASE.format(tag=tag)}/{archive}",
-        checksum_url=f"{DOWNLOAD_BASE.format(tag=tag)}/{checksum}",
         executable=exe,
     )
