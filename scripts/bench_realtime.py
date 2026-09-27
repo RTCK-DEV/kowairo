@@ -96,7 +96,7 @@ def run_once(args, client, asr, vad_model, pcm_in: np.ndarray) -> dict:
         idle_since = None
         while time.monotonic() < deadline:
             pending = (pipe._clause_q.qsize() + pipe._play_q.qsize()
-                       + pipe._playbuf_samples + pipe._utter_q.qsize()
+                       + pipe._playbuf.pending + pipe._utter_q.qsize()
                        + pipe._interim_q.qsize())
             if pending == 0:
                 idle_since = idle_since or time.monotonic()

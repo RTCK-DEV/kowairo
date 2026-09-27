@@ -114,7 +114,9 @@ Releases に Windows x64 版（`Kowairo-windows-x64.tar.gz`、展開して `Kowa
 # 開発環境
 pip install -e ".[dev]"
 ruff check src/
+pytest                           # ユニットテスト (tests/)
 python scripts/gui_smoke.py        # GUI ヘッドレス起動テスト
+python scripts/bench_realtime.py   # エンジン+ASR 実走の遅延ベンチ (要モデル導入済)
 
 # スタンドアロン exe / app ビルド（出力: dist/Kowairo/）
 scripts/build_windows.ps1          # Windows (PowerShell)

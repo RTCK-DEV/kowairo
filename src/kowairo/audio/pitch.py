@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 
@@ -25,7 +27,8 @@ def median_f0(pcm: np.ndarray, sample_rate: int,
         if ac.size == 0:
             continue
         lag = lo + int(np.argmax(ac))
-        norm = ac[lag - lo] / (energy / frame) if energy > 0 else 0.0
+        # normalized autocorrelation at the best lag (ac[0] == energy)
+        norm = ac[lag - lo] / energy if energy > 0 else 0.0
         if norm < 0.3:  # weak periodicity → unvoiced
             continue
         # parabolic refinement
@@ -46,7 +49,5 @@ def semitone_shift(src_f0: float | None, target_f0: float) -> float:
     """Semitone difference from src to target, clamped to a sane range."""
     if src_f0 is None or src_f0 <= 0:
         return 0.0
-    import math
-
     st = 12.0 * math.log2(target_f0 / src_f0)
     return float(max(-12.0, min(12.0, st)))

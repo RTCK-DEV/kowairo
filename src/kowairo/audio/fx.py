@@ -72,8 +72,7 @@ class FxChain:
         D = self._r_delay
         for d, g in zip(self._taps, self._tap_g, strict=False):
             acc += full[D - d: D - d + n] * g
-        self._r_hist = full[-D:] if full.size >= D else \
-            np.pad(full, (D - full.size, 0))
+        self._r_hist = full[-D:]  # full.size = D + n >= D always
         out = pcm * (1.0 - wet) + acc * wet
         return np.clip(out, -1.0, 1.0)
 

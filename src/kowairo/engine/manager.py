@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -76,13 +77,9 @@ class EngineManager:
         entries = list(tmp_dir.iterdir())
         out_dir.parent.mkdir(parents=True, exist_ok=True)
         if out_dir.exists():
-            import shutil
-
             shutil.rmtree(out_dir)
         if len(entries) == 1 and entries[0].is_dir():
             entries[0].replace(out_dir)
-            import shutil
-
             shutil.rmtree(tmp_dir)
         else:
             tmp_dir.replace(out_dir)

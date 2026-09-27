@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import threading
-from dataclasses import asdict, dataclass, field, fields
-from typing import Any
+import types
+from dataclasses import asdict, dataclass, field
+from typing import Any, get_args, get_origin, get_type_hints
 
 from . import paths
 
@@ -77,6 +78,32 @@ class Settings:
 
 _lock = threading.Lock()
 _cache: Settings | None = None
+_HINTS = get_type_hints(Settings)
+
+
+def _accepts(hint: Any, v: Any) -> bool:
+    """Is JSON value `v` acceptable for a field annotated with `hint`?"""
+    origin = get_origin(hint)
+    if origin is not None and origin is not types.UnionType:
+        # e.g. dict[str, Any] — validate the container type only
+        return isinstance(v, origin)
+    types_ = get_args(hint) or (hint,)
+    for t in types_:
+        if t is type(None):
+            if v is None:
+                return True
+        elif t is bool:
+            if isinstance(v, bool):
+                return True
+        elif t is int:
+            if isinstance(v, int) and not isinstance(v, bool):
+                return True
+        elif t is float:
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                return True
+        elif isinstance(t, type) and isinstance(v, t):
+            return True
+    return False
 
 
 def load() -> Settings:
@@ -89,12 +116,15 @@ def load() -> Settings:
         if p.exists():
             try:
                 raw = json.loads(p.read_text(encoding="utf-8"))
-                known = {f.name for f in fields(Settings)}
-                for k, v in raw.items():
-                    if k in known:
-                        setattr(s, k, v)
-                    else:
-                        s.extra[k] = v
+                if isinstance(raw, dict):
+                    for k, v in raw.items():
+                        if k in _HINTS:
+                            # keep the default on type mismatch — a corrupt
+                            # settings.json must not poison the dataclass
+                            if _accepts(_HINTS[k], v):
+                                setattr(s, k, v)
+                        else:
+                            s.extra[k] = v
             except Exception:
                 pass
         _cache = s
