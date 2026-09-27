@@ -47,14 +47,25 @@ class Settings:
     vad_min_silence_ms: int = 450
     vad_min_speech_ms: int = 160
     max_speech_sec: float = 15.0
-    drop_when_behind_ms: int = 900
+    # bounded-lag cap: trimmed at sample granularity when the play backlog
+    # exceeds this; must comfortably cover one interim clause (~16 chars ≈
+    # 3 s of audio) or every clause start would be chopped mid-word
+    drop_when_behind_ms: int = 3000
+
+    # interim recognition — chunk-based competitors (w-okada VCClient, Voidol)
+    # emit converted audio continuously while the user still speaks; an
+    # ASR→TTS cascade can approximate that by decoding the in-flight utterance
+    # periodically and committing clauses that are stable across snapshots.
+    interim_asr: bool = True        # synthesize stable clauses mid-utterance
+    interim_after_ms: int = 1600    # first interim decode after this much speech
+    interim_every_ms: int = 1000    # subsequent interim cadence
 
     record_output: bool = False
     passthrough: bool = False
     muted: bool = False
 
     # competitor-parity controls (w-okada VCClient / VOIDOL)
-    noise_gate_db: float = -60.0  # inputs below this are gated to silence
+    noise_gate_db: float = -60.0  # inputs below this are gated to silence (post-gain RMS)
     input_gain: float = 1.0
     output_gain: float = 1.0
     limiter: bool = True          # tanh soft-clip on output

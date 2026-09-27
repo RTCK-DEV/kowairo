@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -205,8 +206,16 @@ class MainWindow(QMainWindow):
         vf.addRow(self.chk_auto_pitch)
         self.chk_passthrough = QCheckBox("入力をそのまま出力 (パススルー)")
         self.chk_gpu = QCheckBox("GPU で音声合成 (Windows: DirectML / 対応環境: CUDA)")
+        self.chk_interim = QCheckBox(
+            "発話中に先回り合成 (中間認識・応答高速化)")
+        self.chk_interim.setChecked(True)
+        self.chk_interim.setToolTip(
+            "発話中に中間認識を走らせ、安定した文節を先行して合成します。\n"
+            "チャンク方式の競合製品 (w-okada VCClient 等) と同様に\n"
+            "話し終わる前から変換音声が出始めます。")
         vf.addRow(self.chk_passthrough)
         vf.addRow(self.chk_gpu)
+        vf.addRow(self.chk_interim)
         ll.addWidget(voice)
 
         # --- mixer / FX (competitor parity: gain, noise gate, effects)
@@ -494,6 +503,27 @@ class MainWindow(QMainWindow):
         self._log("エンジン接続完了")
         self._refresh_models()
         self._start_asr_setup()
+        self._warmup_tts()
+
+    def _warmup_tts(self) -> None:
+        """Pre-warm the engine's lazy model/ONNX load off the UI thread so
+        the first converted clause doesn't pay the cold-start cost
+        (measured ~5 s vs ~0.4 s warm) — competitors warm at model select."""
+        if not self.client:
+            return
+        style = self.cmb_style.currentData()
+        if style is None:
+            return
+        client = self.client
+
+        def run() -> None:
+            try:
+                client.synthesize("あ", int(style), output_rate=48000)
+                self._bridge.log.emit("音声合成エンジンのウォームアップ完了")
+            except Exception as e:
+                self._bridge.log.emit(f"ウォームアップ合成をスキップ: {e}")
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _start_asr_setup(self) -> None:
         w = AsrSetupWorker(self.asr)
@@ -586,6 +616,7 @@ class MainWindow(QMainWindow):
         self._hide_progress()
         self._log(f"モデル導入完了: {name}")
         self._refresh_models()
+        self._warmup_tts()
 
     # ------------------------------------------------------------------ library
     def _lib_search(self, more: bool = False) -> None:
@@ -678,7 +709,7 @@ class MainWindow(QMainWindow):
         "style_id", "speed_scale", "pitch_semitones", "intonation_scale",
         "volume_scale", "auto_speed", "auto_volume", "auto_pitch",
         "noise_gate_db", "input_gain", "output_gain", "limiter",
-        "fx_mode", "fx_amount", "passthrough")
+        "fx_mode", "fx_amount", "passthrough", "interim_asr")
 
     def _presets(self) -> dict:
         return self.settings.extra.setdefault("presets", {})
@@ -708,6 +739,7 @@ class MainWindow(QMainWindow):
             "fx_mode": self.cmb_fx.currentData() or "off",
             "fx_amount": self.sld_fx.value() / 100.0,
             "passthrough": self.chk_passthrough.isChecked(),
+            "interim_asr": self.chk_interim.isChecked(),
         }
 
     def _preset_save(self) -> None:
@@ -770,6 +802,7 @@ class MainWindow(QMainWindow):
                 self.cmb_fx.setCurrentIndex(i)
                 break
         self.chk_passthrough.setChecked(s.passthrough)
+        self.chk_interim.setChecked(s.interim_asr)
         self.chk_mute.setChecked(s.muted)
         self.chk_monitor.setChecked(s.monitor_enabled)
         self.chk_record.setChecked(s.record_output)
@@ -865,6 +898,7 @@ class MainWindow(QMainWindow):
         s.auto_volume = self.chk_auto_volume.isChecked()
         s.auto_pitch = self.chk_auto_pitch.isChecked()
         s.passthrough = self.chk_passthrough.isChecked()
+        s.interim_asr = self.chk_interim.isChecked()
         s.record_output = self.chk_record.isChecked()
         s.input_gain = self.sld_in_gain.value() / 100.0
         s.output_gain = self.sld_out_gain.value() / 100.0
@@ -981,8 +1015,9 @@ class MainWindow(QMainWindow):
 
     def _on_stats(self, st: PipelineStats) -> None:
         self.lbl_stats.setText(
-            f"遅延: 最新 {st.last_latency_ms:.0f}ms / 平均 "
-            f"{st.avg_latency_ms:.0f}ms | ASR {st.asr_ms:.0f}ms | "
+            f"応答: 最新 {st.last_respond_ms:.0f}ms / 平均 "
+            f"{st.avg_respond_ms:.0f}ms | 終端→音声: "
+            f"{st.last_latency_ms:.0f}ms | ASR {st.asr_ms:.0f}ms | "
             f"TTS {st.tts_ms:.0f}ms | 発話 {st.utterances} 回 | "
             f"破棄 {st.dropped_ms:.0f}ms")
 

@@ -130,6 +130,8 @@ class AsrSetupWorker(QThread):
                     "VADモデルをダウンロード中", r, t))
             self.progress.emit("音声認識を初期化中", 0, 0)
             self.asr.load()
+            self.progress.emit("音声認識をウォームアップ中", 0, 0)
+            self.asr.warmup()
             self.done.emit(self.asr)
         except Exception as e:
             self.failed.emit(str(e))
