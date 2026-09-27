@@ -259,7 +259,7 @@ class MainWindow(QMainWindow):
         self.meter_out = LevelMeter()
         mrow.addWidget(self.meter_out, 1)
         tf.addLayout(mrow)
-        self.lbl_stats = QLabel("遅延: —")
+        self.lbl_stats = QLabel("応答: —")
         tf.addWidget(self.lbl_stats)
         ll.addWidget(trans)
         ll.addStretch(1)
