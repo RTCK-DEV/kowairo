@@ -1,6 +1,6 @@
 # Kowairo（声色）
 
-https://github.com/RTCK-reina/kowairo
+https://github.com/RTCK-DEV/kowairo
 
 **Kowairo** は、[Style-Bert-VITS2 / AivisSpeech 形式の AI 音声モデル](https://booth.pm/ja/items/8442719)（ダウナー系少女音声モデルほか任意の AIVMX モデル）を使った、**専用リアルタイム・ボイスチェンジャー**です。
 
